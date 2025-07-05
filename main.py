@@ -6,6 +6,8 @@ import os
 import requests
 import asyncio
 import aiohttp
+from aiohttp import web
+import threading
 
 load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
@@ -658,7 +660,33 @@ if __name__ == "__main__":
         # Use INFO level for production, DEBUG for development
         log_level = logging.INFO if os.getenv('RENDER') else logging.DEBUG
         
-        bot.run(token, log_handler=handler, log_level=log_level)
+        # Start HTTP server for Render health checks (only in production)
+        if os.getenv('RENDER'):
+            async def health_check(request):
+                return web.Response(text="HopiumBot is running!")
+            
+            async def start_web_server():
+                app = web.Application()
+                app.router.add_get('/', health_check)
+                app.router.add_get('/health', health_check)
+                
+                port = int(os.environ.get('PORT', 8080))
+                runner = web.AppRunner(app)
+                await runner.setup()
+                site = web.TCPSite(runner, '0.0.0.0', port)
+                await site.start()
+                print(f"🌐 Health check server started on port {port}")
+            
+            # Start web server in background
+            async def main():
+                await start_web_server()
+                await bot.start(token)
+            
+            asyncio.run(main())
+        else:
+            # Local development - no web server needed
+            bot.run(token, log_handler=handler, log_level=log_level)
+            
     except discord.LoginFailure:
         print("❌ ERROR: Invalid bot token. Please check your DISCORD_TOKEN environment variable.")
         print("1. Go to https://discord.com/developers/applications")
