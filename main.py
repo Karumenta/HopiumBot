@@ -113,6 +113,25 @@ BLIZZARD_TOKEN_URL = 'https://eu.battle.net/oauth/token'
 WCL_ID = os.getenv('WCL_ID')
 WCL_SECRET = os.getenv('WCL_SECRET')
 
+# Validate required environment variables
+missing_vars = []
+if not BLIZZARD_ID:
+    missing_vars.append('BLIZZARD_ID')
+if not BLIZZARD_SECRET:
+    missing_vars.append('BLIZZARD_SECRET')
+if not WCL_ID:
+    missing_vars.append('WCL_ID')
+if not WCL_SECRET:
+    missing_vars.append('WCL_SECRET')
+
+if missing_vars:
+    error_msg = f"Missing required environment variables: {', '.join(missing_vars)}"
+    print(f"❌ {error_msg}")
+    logger.error(error_msg)
+    print("Please set these variables in your .env file or Render environment variables.")
+else:
+    logger.info("All required API credentials loaded successfully")
+
 # Store ongoing applications
 active_applications = {}
 
@@ -205,10 +224,20 @@ async def periodic_task():
             print(f"❌ Error loading character file: {e}")
             return
         
+        # Check if required API credentials are available
+        if not BLIZZARD_ID or not BLIZZARD_SECRET:
+            error_msg = "Blizzard API credentials not available. Skipping armory update."
+            print(f"❌ {error_msg}")
+            logger.error(error_msg)
+            return
+        
+        logger.info(f"Using Blizzard API credentials - ID: {BLIZZARD_ID[:8]}..., Secret: {'*' * len(BLIZZARD_SECRET)}")
+        
         # Get Blizzard API token with retry logic
         access_token = None
         for attempt in range(3):
             try:
+                logger.info(f"Attempting to get Blizzard API token (attempt {attempt + 1}/3)")
                 response = requests.post(
                     BLIZZARD_TOKEN_URL, 
                     data={'grant_type': 'client_credentials'}, 
@@ -217,11 +246,16 @@ async def periodic_task():
                 )
                 response.raise_for_status()
                 access_token = response.json()['access_token']
+                logger.info("Successfully obtained Blizzard API token")
                 break
             except requests.RequestException as e:
-                print(f"⚠️ Token request attempt {attempt + 1} failed: {e}")
+                error_msg = f"Token request attempt {attempt + 1} failed: {e}"
+                print(f"⚠️ {error_msg}")
+                logger.warning(error_msg)
                 if attempt == 2:
-                    print("❌ Failed to get Blizzard API token after 3 attempts")
+                    final_error = "Failed to get Blizzard API token after 3 attempts"
+                    print(f"❌ {final_error}")
+                    logger.error(final_error)
                     return
                 await asyncio.sleep(2)  # Wait before retry
         
@@ -247,19 +281,28 @@ async def periodic_task():
         
         # Get WCL API token with retry logic
         wcl_access_token = None
-        for attempt in range(3):
-            try:
-                wcl_token_url = "https://fresh.warcraftlogs.com/oauth/token"
-                wcl_data = {"grant_type": "client_credentials"}
-                wcl_response = requests.post(wcl_token_url, data=wcl_data, auth=(WCL_ID, WCL_SECRET), timeout=10)
-                wcl_response.raise_for_status()
-                wcl_access_token = wcl_response.json()["access_token"]
-                break
-            except requests.RequestException as e:
-                print(f"⚠️ WCL token request attempt {attempt + 1} failed: {e}")
-                if attempt == 2:
-                    print("❌ Failed to get WCL API token after 3 attempts")
-                await asyncio.sleep(2)  # Wait before retry
+        if WCL_ID and WCL_SECRET:
+            for attempt in range(3):
+                try:
+                    logger.info(f"Attempting to get WCL API token (attempt {attempt + 1}/3)")
+                    wcl_token_url = "https://fresh.warcraftlogs.com/oauth/token"
+                    wcl_data = {"grant_type": "client_credentials"}
+                    wcl_response = requests.post(wcl_token_url, data=wcl_data, auth=(WCL_ID, WCL_SECRET), timeout=10)
+                    wcl_response.raise_for_status()
+                    wcl_access_token = wcl_response.json()["access_token"]
+                    logger.info("Successfully obtained WCL API token")
+                    break
+                except requests.RequestException as e:
+                    error_msg = f"WCL token request attempt {attempt + 1} failed: {e}"
+                    print(f"⚠️ {error_msg}")
+                    logger.warning(error_msg)
+                    if attempt == 2:
+                        final_error = "Failed to get WCL API token after 3 attempts"
+                        print(f"❌ {final_error}")
+                        logger.error(final_error)
+                    await asyncio.sleep(2)  # Wait before retry
+        else:
+            logger.warning("WCL API credentials not available. Skipping WCL data updates.")
         
         # Fetch equipment and parses for each character with rate limiting
         new_items_found = 0
@@ -358,6 +401,8 @@ async def periodic_task():
                     }
                     headers = {'Authorization': f'Bearer {access_token}'}
                     
+                    logger.debug(f"Fetching armory data for {player_name} from {url}")
+                    
                     # Use async HTTP client for better performance
                     async with aiohttp.ClientSession() as session:
                         async with session.get(url, params=params, headers=headers, timeout=10) as response:
@@ -377,21 +422,48 @@ async def periodic_task():
                                     armory_data[player_name].extend(new_items)
                                     new_items_found += len(new_items)
                                     print(f"🆕 {player_name}: {len(new_items)} new items")
+                                    logger.info(f"Found {len(new_items)} new items for {player_name}")
                                     
                                     # Log each new item
                                     for item in new_items:
-                                        logging.info(f"New item found for {player_name}: {item}")
+                                        logger.info(f"New item found for {player_name}: {item}")
+                                else:
+                                    logger.debug(f"No new items for {player_name}")
                             
+                            elif response.status == 401:
+                                error_msg = f"Unauthorized request for {player_name} - token may be expired"
+                                print(f"❌ {error_msg}")
+                                logger.error(error_msg)
+                            elif response.status == 403:
+                                error_msg = f"Forbidden request for {player_name} - check API credentials"
+                                print(f"❌ {error_msg}")
+                                logger.error(error_msg)
                             elif response.status == 404:
                                 print(f"⚠️ Character not found on Blizzard API: {player_name}")
+                                logger.warning(f"Character not found on Blizzard API: {player_name}")
                             elif response.status == 429:
                                 print(f"⚠️ Blizzard API rate limited for {player_name}, waiting...")
+                                logger.warning(f"Blizzard API rate limited for {player_name}")
                                 await asyncio.sleep(5)
                             else:
-                                print(f"⚠️ Blizzard API error for {player_name}: {response.status}")
+                                error_msg = f"Blizzard API error for {player_name}: HTTP {response.status}"
+                                print(f"⚠️ {error_msg}")
+                                logger.error(error_msg)
+                                # Log response text for debugging
+                                try:
+                                    response_text = await response.text()
+                                    logger.error(f"Response body: {response_text[:200]}")
+                                except:
+                                    pass
                 
+                except aiohttp.ClientError as e:
+                    error_msg = f"Network error fetching Blizzard armory for {player_name}: {str(e)}"
+                    print(f"⚠️ {error_msg}")
+                    logger.error(error_msg)
                 except Exception as e:
-                    print(f"⚠️ Error fetching Blizzard armory for {player_name}: {str(e)[:100]}")
+                    error_msg = f"Unexpected error fetching Blizzard armory for {player_name}: {str(e)}"
+                    print(f"⚠️ {error_msg}")
+                    logger.error(error_msg, exc_info=True)
                 
                 characters_processed += 1
                 
