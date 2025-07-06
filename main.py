@@ -38,7 +38,22 @@ from datetime import datetime
 load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
 
-handler = logging.FileHandler(filename='hopiumbot.log', encoding='utf-8', mode='w')
+# Configure logging for both local and Render environments
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # This outputs to stdout/stderr for Render logs
+        logging.FileHandler('hopiumbot.log', encoding='utf-8', mode='a') if not os.getenv('RENDER') else logging.NullHandler()
+    ]
+)
+
+# Set discord.py logging level to reduce spam
+logging.getLogger('discord').setLevel(logging.WARNING)
+logging.getLogger('discord.http').setLevel(logging.WARNING)
+
+# Create logger for our bot
+logger = logging.getLogger('HopiumBot')
 intents = discord.Intents.default()
 intents.message_content = True  # Enable message content intent
 intents.guilds = True  # Enable guild intents
@@ -134,9 +149,11 @@ def initialize_data_files():
             print(f"📄 Created empty parses file: {PARSES_FILE}")
         
         print(f"✅ Data files initialized successfully")
+        logger.info("Data files initialized successfully")
         
     except Exception as e:
         print(f"❌ Error initializing data files: {e}")
+        logger.error(f"Error initializing data files: {e}", exc_info=True)
 
 # Initialize data files on startup
 initialize_data_files()
@@ -145,7 +162,9 @@ initialize_data_files()
 @tasks.loop(minutes=5)  # Reduced frequency - 1 minute is too aggressive for API calls
 async def periodic_task():
     try:
-        print(f"🔄 Starting periodic armory update at {datetime.now().strftime('%H:%M:%S')}")
+        current_time = datetime.now().strftime('%H:%M:%S')
+        print(f"🔄 Starting periodic armory update at {current_time}")
+        logger.info(f"Starting periodic armory update at {current_time}")
         
         # Ensure required directories exist
         os.makedirs(TMB_DIR, exist_ok=True)
@@ -416,16 +435,19 @@ async def periodic_task():
                     os.remove(temp_file)
         
         print(f"✅ Data update completed - {characters_processed}/{len(players)} characters processed")
+        logger.info(f"Data update completed - {characters_processed}/{len(players)} characters processed")
         print(f"   📊 Summary: {new_items_found} new items, {new_parses_found} parse updates")
+        logger.info(f"Summary: {new_items_found} new items, {new_parses_found} parse updates")
         
     except Exception as e:
         print(f"❌ Critical error in periodic task: {e}")
-        logging.error(f"Periodic task error: {e}", exc_info=True)
+        logger.error(f"Critical error in periodic task: {e}", exc_info=True)
 
 @periodic_task.before_loop
 async def before_periodic_task():
     await bot.wait_until_ready()
     print("🚀 Periodic task started - will run every 5 minutes")
+    logger.info("Periodic task started - will run every 5 minutes")
 
 async def validate_character_exists(character_name):
     try:
@@ -972,14 +994,18 @@ async def complete_application(user, app_data):
         await review_channel.send(embed=links_embed)
 
 @bot.event
+@bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name} - {bot.user.id}')
+    logger.info(f'Bot logged in as {bot.user.name} - {bot.user.id}')
     print(f'Bot is in {len(bot.guilds)} guilds')
+    logger.info(f'Bot is in {len(bot.guilds)} guilds')
     print('------')
     
     # Start the periodic task
     if not periodic_task.is_running():
         periodic_task.start()
+        logger.info('Periodic task started')
 
 @bot.event
 async def on_error(event, *args, **kwargs):
@@ -3306,10 +3332,14 @@ def createExcel():
 if __name__ == "__main__":
     try:
         print("🤖 Starting HopiumBot...")
+        logger.info("Starting HopiumBot...")
         print(f"Token present: {'Yes' if token else 'No'}")
+        logger.info(f"Token present: {'Yes' if token else 'No'}")
         
         # Use INFO level for production, DEBUG for development
         log_level = logging.INFO if os.getenv('RENDER') else logging.DEBUG
+        logger.info(f"Environment: {'Render (Production)' if os.getenv('RENDER') else 'Local Development'}")
+        logger.info(f"Log level: {log_level}")
         
         # Start HTTP server for Render health checks (only in production)
         if os.getenv('RENDER'):
@@ -3327,6 +3357,7 @@ if __name__ == "__main__":
                 site = web.TCPSite(runner, '0.0.0.0', port)
                 await site.start()
                 print(f"🌐 Health check server started on port {port}")
+                logger.info(f"Health check server started on port {port}")
             
             # Start web server in background
             async def main():
@@ -3336,24 +3367,31 @@ if __name__ == "__main__":
             asyncio.run(main())
         else:
             # Local development - no web server needed
-            bot.run(token, log_handler=handler, log_level=log_level)
+            logger.info("🚀 Starting bot in local development mode")
+            bot.run(token)
             
     except discord.LoginFailure:
-        print("❌ ERROR: Invalid bot token. Please check your DISCORD_TOKEN environment variable.")
+        error_msg = "Invalid bot token. Please check your DISCORD_TOKEN environment variable."
+        print(f"❌ ERROR: {error_msg}")
+        logger.error(error_msg)
         print("1. Go to https://discord.com/developers/applications")
         print("2. Select your application > Bot")
         print("3. Reset Token and update your environment variables")
     except discord.HTTPException as e:
         if "PHONE_REGISTRATION_ERROR" in str(e):
-            print("❌ PHONE_REGISTRATION_ERROR: This is a Discord account/token issue.")
+            error_msg = "PHONE_REGISTRATION_ERROR: This is a Discord account/token issue."
+            print(f"❌ {error_msg}")
+            logger.error(error_msg)
             print("Solutions:")
             print("1. Regenerate your bot token")
             print("2. Check if your Discord account needs phone verification")
             print("3. Wait 24-48 hours and try again")
         else:
             print(f"❌ HTTP Error: {e}")
+            logger.error(f"HTTP Error: {e}")
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
+        logger.error(f"Unexpected error: {e}", exc_info=True)
         # Exit gracefully in production
         import sys
         sys.exit(1)
