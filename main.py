@@ -530,10 +530,13 @@ async def process_guild_data(guild_id, paths):
         # Save updated armory data atomically
         if new_items_found > 0 or characters_processed > 0:
             try:
+                # Sort armory data alphabetically by character name before saving
+                sorted_armory_data = dict(sorted(armory_data.items()))
+                
                 # Write to temporary file first, then rename (atomic operation)
                 temp_file = paths['armory_file'] + '.tmp'
                 with open(temp_file, "w", encoding="utf-8") as f:
-                    json.dump(armory_data, f, ensure_ascii=False, indent=2)
+                    json.dump(sorted_armory_data, f, ensure_ascii=False, indent=2)
                 
                 # Atomic rename
                 os.replace(temp_file, paths['armory_file'])
@@ -1168,7 +1171,7 @@ class BotManagementView(discord.ui.View):
             if workbook:
                 # Save and send the file
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"attendance_report_{interaction.guild.name}_{timestamp}.xlsx"
+                filename = f"attendance_sheet_{interaction.guild.name}_{timestamp}.xlsx"
                 file_path = os.path.join(paths['sheet_dir'], filename)
                 
                 workbook.save(file_path)
@@ -1215,7 +1218,7 @@ class BotManagementView(discord.ui.View):
             if workbook:
                 # Save and send the file
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"class_items_report_{interaction.guild.name}_{timestamp}.xlsx"
+                filename = f"class_items_sheet_{interaction.guild.name}_{timestamp}.xlsx"
                 file_path = os.path.join(paths['sheet_dir'], filename)
                 
                 workbook.save(file_path)
@@ -1262,7 +1265,7 @@ class BotManagementView(discord.ui.View):
             if workbook:
                 # Save and send the file
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"loot_report_{interaction.guild.name}_{timestamp}.xlsx"
+                filename = f"loot_template_sheet_{interaction.guild.name}_{timestamp}.xlsx"
                 file_path = os.path.join(paths['sheet_dir'], filename)
                 
                 workbook.save(file_path)
@@ -1463,12 +1466,12 @@ async def setupHopium(ctx):
     )
     
     guide_embed.add_field(
-        name="📊 Excel Generation (Coming Soon)",
-        value="Use the buttons below for future Excel file generation features:\n• **Get Attendance** - Guild attendance reports\n• **Get Class Items** - Class-specific item analysis\n• **Get Loot** - Loot distribution reports\n• **Get All** - Comprehensive guild data export",
+        name="📊 Excel Generation",
+        value="Use the buttons below to generate Excel reports:\n• **Get Attendance** - Guild attendance sheet\n• **Get Class Items** - Class-specific item sheet\n• **Get Loot** - Loot prio template sheet\n• **Get All** - All of the above in one file",
         inline=False
     )
     
-    guide_embed.set_footer(text="Click the buttons below for future Excel generation features • Officers & Guild Leaders only")
+    guide_embed.set_footer(text="Click the buttons below for Excel generation features • Officers & Guild Leaders only")
     
     management_view = BotManagementView()
     await hopium_bot_channel.send(embed=guide_embed, view=management_view)
@@ -1922,26 +1925,27 @@ async def get_player_data(ctx, data_type: str = None, player_name: str = None):
                     timestamp=datetime.now()
                 )
                 
-                # Split items into chunks to avoid Discord's field value limit (1024 chars)
-                chunk_size = 20  # Items per field
-                item_chunks = [player_items[i:i + chunk_size] for i in range(0, len(player_items), chunk_size)]
+                # Format all items as a single list (no chunking)
+                item_list = []
+                for item in player_items:
+                    item_list.append(f"• {item}")
                 
-                for i, chunk in enumerate(item_chunks):
-                    if len(item_chunks) > 1:
-                        field_name = f"🎽 Equipment (Part {i+1}/{len(item_chunks)})"
-                    else:
-                        field_name = "🎽 Equipment"
-                    
-                    # Format items as a bulleted list
-                    item_list = []
-                    for item in chunk:
-                        item_list.append(f"• {item}")
-                    
-                    embed.add_field(
-                        name=field_name,
-                        value="\n".join(item_list),
-                        inline=False
-                    )
+                # Join all items into one field value, Discord will handle truncation if needed
+                items_text = "\n".join(item_list)
+                
+                # If the text is too long for a single field, we'll truncate with a note
+                if len(items_text) > 1024:
+                    # Find a good truncation point (at a line break)
+                    truncate_at = items_text.rfind("\n", 0, 1000)
+                    if truncate_at == -1:
+                        truncate_at = 1000
+                    items_text = items_text[:truncate_at] + f"\n... and {len(player_items) - items_text[:truncate_at].count('•')} more items"
+                
+                embed.add_field(
+                    name="🎽 Equipment",
+                    value=items_text,
+                    inline=False
+                )
         
         elif data_type == 'parses':
             # Handle parses data (dictionary with performance metrics)
@@ -2581,10 +2585,13 @@ async def upload_armory_file(ctx):
         
         # Save merged armory data using guild-specific paths
         try:
+            # Sort merged armory data alphabetically by character name before saving
+            sorted_merged_armory = dict(sorted(merged_armory.items()))
+            
             # Write to temporary file first for atomic operation
             temp_file = paths['armory_file'] + '.tmp'
             with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(merged_armory, f, ensure_ascii=False, indent=2)
+                json.dump(sorted_merged_armory, f, ensure_ascii=False, indent=2)
             
             # Atomic rename
             os.replace(temp_file, paths['armory_file'])
