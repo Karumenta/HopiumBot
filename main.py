@@ -48,6 +48,9 @@ logging.basicConfig(
     ]
 )
 
+# Store ongoing applications
+active_applications = {}
+
 # Set discord.py logging level to reduce spam
 logging.getLogger('discord').setLevel(logging.WARNING)
 logging.getLogger('discord.http').setLevel(logging.WARNING)
@@ -59,52 +62,18 @@ intents.message_content = True  # Enable message content intent
 intents.guilds = True  # Enable guild intents
 intents.members = True  # Enable member intents
 
-bot = commands.Bot(command_prefix='!', intents=intents)
-
-role = "Trial"
-
-# Define paths that work both locally and on Render
-def get_data_path():
-    if os.getenv('RENDER'):
-        # Production on Render
-        return '/app/data'
-    else:
-        # Local development
-        base_dir = os.path.dirname(os.path.abspath(__file__))  # Gets current file directory
-        return os.path.join(base_dir, 'app', 'data')
-
-def calculate_gradient_color(value, start_color, end_color):
-    value = max(0, min(1, value))
-
-    start_red, start_green, start_blue = start_color
-    end_red, end_green, end_blue = end_color
-
-    red = int(start_red + (end_red - start_red) * value)
-    green = int(start_green + (end_green - start_green) * value)
-    blue = int(start_blue + (end_blue - start_blue) * value)
-
-    return f"{red:02X}{green:02X}{blue:02X}"
-
-# Get the data directory and ensure it exists
-DATA_DIR = get_data_path()
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# TMB directory and files
-TMB_DIR = DATA_DIR + '/tmb'
-CHARACTER_FILE = os.path.join(TMB_DIR, 'character-json.json')
-ATTENDANCE_FILE = os.path.join(TMB_DIR, 'hopium-attendance.csv')
-ITEM_FILE = os.path.join(TMB_DIR, 'item-notes.csv')
-
-# Cache directory and files
-CACHE_DIR = DATA_DIR + '/cache'
-ARMORY_FILE = os.path.join(CACHE_DIR, 'armory.json')
-ITEM_ICONS_FILE = os.path.join(CACHE_DIR, 'item-icons.json')
-PARSES_FILE = os.path.join(CACHE_DIR, 'parses.json')
-
-# Sheet directory and files
-SHEET_DIR = DATA_DIR + '/sheets'
-os.makedirs(SHEET_DIR, exist_ok=True)
-
+# Application questions
+APPLICATION_QUESTIONS = [
+    "Character name:",
+    "Class/Spec:",
+    "What country are you from and how old are you?",
+    "Please tell us a bit about yourself, who are you outside of the game?",
+    "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
+    "We require a few things from every raider in the guild. To have above average performance for your class and atleast 80% raid attendance. Can you fulfill these requirements?",
+    "Why did you choose to apply to <Hopium>?",
+    "Can someone in <Hopium> vouch for you?",
+    "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
+]
 
 BLIZZARD_ID = os.getenv('BLIZZARD_ID')
 BLIZZARD_SECRET = os.getenv('BLIZZARD_SECRET')
@@ -132,97 +101,183 @@ if missing_vars:
 else:
     logger.info("All required API credentials loaded successfully")
 
-# Store ongoing applications
-active_applications = {}
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Initialize required directories and files
-def initialize_data_files():
-    """Initialize required directories and files if they don't exist"""
+role = "Trial"
+
+# Define guild-specific paths that work both locally and on Render
+def get_guild_data_path(guild_id):
+    """Get data path specific to a guild"""
+    if os.getenv('RENDER'):
+        # Production on Render
+        base_path = '/app/data'
+    else:
+        # Local development
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_path = os.path.join(base_dir, 'app', 'data')
+    
+    # Create guild-specific directory
+    guild_path = os.path.join(base_path, f'guild_{guild_id}')
+    os.makedirs(guild_path, exist_ok=True)
+    return guild_path
+
+def get_guild_file_paths(guild_id):
+    """Get all file paths for a specific guild"""
+    guild_data_dir = get_guild_data_path(guild_id)
+    
+    # TMB directory and files
+    tmb_dir = os.path.join(guild_data_dir, 'tmb')
+    character_file = os.path.join(tmb_dir, 'character-json.json')
+    attendance_file = os.path.join(tmb_dir, 'hopium-attendance.csv')
+    item_file = os.path.join(tmb_dir, 'item-notes.csv')
+    
+    # Cache directory and files
+    cache_dir = os.path.join(guild_data_dir, 'cache')
+    armory_file = os.path.join(cache_dir, 'armory.json')
+    item_icons_file = os.path.join(cache_dir, 'item-icons.json')
+    parses_file = os.path.join(cache_dir, 'parses.json')
+    
+    # Sheet directory
+    sheet_dir = os.path.join(guild_data_dir, 'sheets')
+    
+    return {
+        'guild_data_dir': guild_data_dir,
+        'tmb_dir': tmb_dir,
+        'cache_dir': cache_dir,
+        'sheet_dir': sheet_dir,
+        'character_file': character_file,
+        'attendance_file': attendance_file,
+        'item_file': item_file,
+        'armory_file': armory_file,
+        'item_icons_file': item_icons_file,
+        'parses_file': parses_file
+    }
+
+def calculate_gradient_color(value, start_color, end_color):
+    value = max(0, min(1, value))
+
+    start_red, start_green, start_blue = start_color
+    end_red, end_green, end_blue = end_color
+
+    red = int(start_red + (end_red - start_red) * value)
+    green = int(start_green + (end_green - start_green) * value)
+    blue = int(start_blue + (end_blue - start_blue) * value)
+
+    return f"{red:02X}{green:02X}{blue:02X}"
+
+# Initialize guild-specific data files
+def initialize_guild_data_files(guild_id):
+    """Initialize required directories and files for a specific guild"""
     try:
+        paths = get_guild_file_paths(guild_id)
+        
         # Create directories
-        os.makedirs(TMB_DIR, exist_ok=True)
-        os.makedirs(CACHE_DIR, exist_ok=True)
+        os.makedirs(paths['tmb_dir'], exist_ok=True)
+        os.makedirs(paths['cache_dir'], exist_ok=True)
+        os.makedirs(paths['sheet_dir'], exist_ok=True)
         
         # Initialize character file if it doesn't exist
-        if not os.path.exists(CHARACTER_FILE):
-            with open(CHARACTER_FILE, 'w', encoding='utf-8') as f:
+        if not os.path.exists(paths['character_file']):
+            with open(paths['character_file'], 'w', encoding='utf-8') as f:
                 json.dump([], f)
-            print(f"📄 Created empty character file: {CHARACTER_FILE}")
+            print(f"📄 Created empty character file for guild {guild_id}")
         
         # Initialize armory file if it doesn't exist
-        if not os.path.exists(ARMORY_FILE):
-            with open(ARMORY_FILE, 'w', encoding='utf-8') as f:
+        if not os.path.exists(paths['armory_file']):
+            with open(paths['armory_file'], 'w', encoding='utf-8') as f:
                 json.dump({}, f)
-            print(f"📄 Created empty armory file: {ARMORY_FILE}")
+            print(f"📄 Created empty armory file for guild {guild_id}")
         
         # Initialize item icons file if it doesn't exist
-        if not os.path.exists(ITEM_ICONS_FILE):
-            with open(ITEM_ICONS_FILE, 'w', encoding='utf-8') as f:
+        if not os.path.exists(paths['item_icons_file']):
+            with open(paths['item_icons_file'], 'w', encoding='utf-8') as f:
                 json.dump({}, f)
-            print(f"📄 Created empty item icons file: {ITEM_ICONS_FILE}")
+            print(f"📄 Created empty item icons file for guild {guild_id}")
         
         # Initialize parses file if it doesn't exist
-        if not os.path.exists(PARSES_FILE):
-            with open(PARSES_FILE, 'w', encoding='utf-8') as f:
+        if not os.path.exists(paths['parses_file']):
+            with open(paths['parses_file'], 'w', encoding='utf-8') as f:
                 json.dump({}, f)
-            print(f"📄 Created empty parses file: {PARSES_FILE}")
+            print(f"📄 Created empty parses file for guild {guild_id}")
         
-        print(f"✅ Data files initialized successfully")
-        logger.info("Data files initialized successfully")
+        print(f"✅ Data files initialized successfully for guild {guild_id}")
+        logger.info(f"Data files initialized successfully for guild {guild_id}")
         
     except Exception as e:
-        print(f"❌ Error initializing data files: {e}")
-        logger.error(f"Error initializing data files: {e}", exc_info=True)
-
-# Initialize data files on startup
-initialize_data_files()
+        print(f"❌ Error initializing data files for guild {guild_id}: {e}")
+        logger.error(f"Error initializing data files for guild {guild_id}: {e}", exc_info=True)
 
 # Background task that runs every X minutes
 @tasks.loop(minutes=5)  # Reduced frequency - 1 minute is too aggressive for API calls
 async def periodic_task():
     try:
         current_time = datetime.now().strftime('%H:%M:%S')
-        print(f"🔄 Starting periodic armory update at {current_time}")
-        logger.info(f"Starting periodic armory update at {current_time}")
+        print(f"🔄 Starting periodic update for all guilds at {current_time}")
+        logger.info(f"Starting periodic update for all guilds at {current_time}")
         
-        # Ensure required directories exist
-        os.makedirs(TMB_DIR, exist_ok=True)
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        
-        # Check if required files exist
-        if not os.path.exists(CHARACTER_FILE):
-            print(f"⚠️ Character file not found: {CHARACTER_FILE}")
-            return
-            
-        # Load players with better error handling
-        players = {}
-        try:
-            with open(CHARACTER_FILE, 'r', encoding='utf-8') as file:
-                character_data = json.load(file)
-                for playerInfo in character_data:
-                    player_name = playerInfo.get('name', '').strip()
-                    if player_name:
-                        # Handle display_archetype - default to "DPS" if None or empty
-                        display_archetype = playerInfo.get('display_archetype')
-                        if display_archetype is None or not display_archetype.strip():
-                            archetype = "DPS"
-                        else:
-                            archetype = display_archetype.strip()
-                        
-                        player = {
-                            "name": player_name.capitalize(),
-                            "archetype": archetype,
-                        }
-                        players[player_name.lower()] = player
-            
-            if not players:
-                print("ℹ️ No players found in character file")
-                return
+        # Process each guild the bot is in
+        for guild in bot.guilds:
+            try:
+                print(f"🏰 Processing guild: {guild.name} (ID: {guild.id})")
+                logger.info(f"Processing guild: {guild.name} (ID: {guild.id})")
                 
-            print(f"📋 Processing {len(players)} characters")
-        except (json.JSONDecodeError, FileNotFoundError) as e:
-            print(f"❌ Error loading character file: {e}")
+                # Initialize guild data files if needed
+                initialize_guild_data_files(guild.id)
+                
+                # Get guild-specific file paths
+                paths = get_guild_file_paths(guild.id)
+                
+                # Check if required files exist for this guild
+                if not os.path.exists(paths['character_file']):
+                    print(f"⚠️ Character file not found for guild {guild.name}: {paths['character_file']}")
+                    continue
+                
+                # Process this guild's data
+                await process_guild_data(guild.id, paths)
+                
+            except Exception as e:
+                print(f"❌ Error processing guild {guild.name}: {e}")
+                logger.error(f"Error processing guild {guild.name}: {e}", exc_info=True)
+                continue
+        
+        print(f"✅ Periodic update completed for all guilds")
+        logger.info(f"Periodic update completed for all guilds")
+        
+    except Exception as e:
+        print(f"❌ Critical error in periodic task: {e}")
+        logger.error(f"Critical error in periodic task: {e}", exc_info=True)
+
+async def process_guild_data(guild_id, paths):
+    """Process data for a specific guild"""
+    # Load players with better error handling
+    players = {}
+    try:
+        with open(paths['character_file'], 'r', encoding='utf-8') as file:
+            character_data = json.load(file)
+            for playerInfo in character_data:
+                player_name = playerInfo.get('name', '').strip()
+                if player_name:
+                    # Handle display_archetype - default to "DPS" if None or empty
+                    display_archetype = playerInfo.get('display_archetype')
+                    if display_archetype is None or not display_archetype.strip():
+                        archetype = "DPS"
+                    else:
+                        archetype = display_archetype.strip()
+                    
+                    player = {
+                        "name": player_name.capitalize(),
+                        "archetype": archetype,
+                    }
+                    players[player_name.lower()] = player
+        
+        if not players:
+            print("ℹ️ No players found in character file")
             return
+            
+        print(f"📋 Processing {len(players)} characters")
+    except (json.JSONDecodeError, FileNotFoundError) as e:
+        print(f"❌ Error loading character file: {e}")
+        return
         
         # Check if required API credentials are available
         if not BLIZZARD_ID or not BLIZZARD_SECRET:
@@ -259,21 +314,21 @@ async def periodic_task():
                     return
                 await asyncio.sleep(2)  # Wait before retry
         
-        # Load existing armory data
+        # Load existing armory data using guild-specific paths
         armory_data = {}
-        if os.path.exists(ARMORY_FILE):
+        if os.path.exists(paths['armory_file']):
             try:
-                with open(ARMORY_FILE, "r", encoding="utf-8") as f:
+                with open(paths['armory_file'], "r", encoding="utf-8") as f:
                     armory_data = json.load(f)
             except (json.JSONDecodeError, FileNotFoundError):
                 print("⚠️ Creating new armory file")
                 armory_data = {}
         
-        # Load existing parses data
+        # Load existing parses data using guild-specific paths
         parses_data = {}
-        if os.path.exists(PARSES_FILE):
+        if os.path.exists(paths['parses_file']):
             try:
-                with open(PARSES_FILE, "r", encoding="utf-8") as f:
+                with open(paths['parses_file'], "r", encoding="utf-8") as f:
                     parses_data = json.load(f)
             except (json.JSONDecodeError, FileNotFoundError):
                 print("⚠️ Creating new parses file")
@@ -476,12 +531,12 @@ async def periodic_task():
         if new_items_found > 0 or characters_processed > 0:
             try:
                 # Write to temporary file first, then rename (atomic operation)
-                temp_file = ARMORY_FILE + '.tmp'
+                temp_file = paths['armory_file'] + '.tmp'
                 with open(temp_file, "w", encoding="utf-8") as f:
                     json.dump(armory_data, f, ensure_ascii=False, indent=2)
                 
                 # Atomic rename
-                os.replace(temp_file, ARMORY_FILE)
+                os.replace(temp_file, paths['armory_file'])
                 print(f"💾 Armory data saved - {new_items_found} new items found")
             except Exception as e:
                 print(f"❌ Error saving armory data: {e}")
@@ -493,12 +548,12 @@ async def periodic_task():
         if new_parses_found > 0 or characters_processed > 0:
             try:
                 # Write to temporary file first, then rename (atomic operation)
-                temp_file = PARSES_FILE + '.tmp'
+                temp_file = paths['parses_file'] + '.tmp'
                 with open(temp_file, "w", encoding="utf-8") as f:
                     json.dump(parses_data, f, ensure_ascii=False, indent=2)
                 
                 # Atomic rename
-                os.replace(temp_file, PARSES_FILE)
+                os.replace(temp_file, paths['parses_file'])
                 print(f"� Parses data saved - {new_parses_found} characters updated")
             except Exception as e:
                 print(f"❌ Error saving parses data: {e}")
@@ -588,19 +643,6 @@ async def validate_character_name(character_name, guild=None):
         if guild:
             staff_mentions = await get_staff_mentions(guild)
         return False, f"Unexpected error while verifying character. Please contact {staff_mentions} for assistance."
-
-# Application questions
-APPLICATION_QUESTIONS = [
-    "Character name:",
-    "Class/Spec:",
-    "What country are you from and how old are you?",
-    "Please tell us a bit about yourself, who are you outside of the game?",
-    "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
-    "We require a few things from every raider in the guild. To have above average performance for your class and atleast 80% raid attendance. Can you fulfill these requirements?",
-    "Why did you choose to apply to <Hopium>?",
-    "Can someone in <Hopium> vouch for you?",
-    "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
-]
 
 class ApplicationView(discord.ui.View):
     def __init__(self):
@@ -1109,8 +1151,42 @@ class BotManagementView(discord.ui.View):
             await interaction.response.send_message("❌ You don't have permission to use this feature. Required roles: Officer or Guild Leader.", ephemeral=True)
             return
         
-        # Placeholder implementation
-        await interaction.response.send_message("📊 **Get Attendance** feature is coming soon!\n\nThis will provide access to guild attendance data and reports.", ephemeral=True)
+        try:
+            # Get guild-specific data
+            guild_id = interaction.guild.id
+            paths = get_guild_file_paths(guild_id)
+            
+            # Initialize guild data if needed
+            initialize_guild_data_files(guild_id)
+            
+            # Generate Excel for this guild
+            await interaction.response.send_message("📊 Generating attendance report for this server...", ephemeral=True)
+            
+            # Create guild-specific Excel (Attendance type)
+            workbook = createExcel(guild_id, "Attendance")
+            
+            if workbook:
+                # Save and send the file
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"attendance_report_{interaction.guild.name}_{timestamp}.xlsx"
+                file_path = os.path.join(paths['sheet_dir'], filename)
+                
+                workbook.save(file_path)
+                
+                # Edit the original message to send the file
+                await interaction.edit_original_response(
+                    content=f"📊 **Attendance Report for {interaction.guild.name}**\nGenerated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\nThis report contains attendance data for all guild members.",
+                    attachments=[discord.File(file_path, filename=filename)]
+                )
+                
+                # Clean up file
+                os.remove(file_path)
+            else:
+                await interaction.edit_original_response(content="❌ Failed to generate Excel file. Please check the data files.")
+            
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Error generating Excel report: {str(e)[:100]}...")
+            logger.error(f"Error in attendance button: {e}", exc_info=True)
     
     @discord.ui.button(label='Get Class Items', style=discord.ButtonStyle.primary, emoji='⚔️')
     async def get_class_items_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1122,8 +1198,42 @@ class BotManagementView(discord.ui.View):
             await interaction.response.send_message("❌ You don't have permission to use this feature. Required roles: Officer or Guild Leader.", ephemeral=True)
             return
         
-        # Placeholder implementation
-        await interaction.response.send_message("⚔️ **Get Class Items** feature is coming soon!\n\nThis will provide access to class-specific item data and recommendations.", ephemeral=True)
+        try:
+            # Get guild-specific data
+            guild_id = interaction.guild.id
+            paths = get_guild_file_paths(guild_id)
+            
+            # Initialize guild data if needed
+            initialize_guild_data_files(guild_id)
+            
+            # Generate Excel for this guild
+            await interaction.response.send_message("⚔️ Generating class items report for this server...", ephemeral=True)
+            
+            # Create guild-specific Excel (Class Items type)
+            workbook = createExcel(guild_id, "Class Items")
+            
+            if workbook:
+                # Save and send the file
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"class_items_report_{interaction.guild.name}_{timestamp}.xlsx"
+                file_path = os.path.join(paths['sheet_dir'], filename)
+                
+                workbook.save(file_path)
+                
+                # Edit the original message to send the file
+                await interaction.edit_original_response(
+                    content=f"⚔️ **Class Items Report for {interaction.guild.name}**\nGenerated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\nThis report contains class-specific item data and recommendations.",
+                    attachments=[discord.File(file_path, filename=filename)]
+                )
+                
+                # Clean up file
+                os.remove(file_path)
+            else:
+                await interaction.edit_original_response(content="❌ Failed to generate Excel file. Please check the data files.")
+            
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Error generating class items report: {str(e)[:100]}...")
+            logger.error(f"Error in class items button: {e}", exc_info=True)
     
     @discord.ui.button(label='Get Loot', style=discord.ButtonStyle.primary, emoji='💎')
     async def get_loot_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1135,8 +1245,42 @@ class BotManagementView(discord.ui.View):
             await interaction.response.send_message("❌ You don't have permission to use this feature. Required roles: Officer or Guild Leader.", ephemeral=True)
             return
         
-        # Placeholder implementation
-        await interaction.response.send_message("💎 **Get Loot** feature is coming soon!\n\nThis will provide access to guild loot distribution data and analytics.", ephemeral=True)
+        try:
+            # Get guild-specific data
+            guild_id = interaction.guild.id
+            paths = get_guild_file_paths(guild_id)
+            
+            # Initialize guild data if needed
+            initialize_guild_data_files(guild_id)
+            
+            # Generate Excel for this guild
+            await interaction.response.send_message("💎 Generating loot distribution report for this server...", ephemeral=True)
+            
+            # Create guild-specific Excel (Loot type)
+            workbook = createExcel(guild_id, "Loot")
+            
+            if workbook:
+                # Save and send the file
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"loot_report_{interaction.guild.name}_{timestamp}.xlsx"
+                file_path = os.path.join(paths['sheet_dir'], filename)
+                
+                workbook.save(file_path)
+                
+                # Edit the original message to send the file
+                await interaction.edit_original_response(
+                    content=f"💎 **Loot Distribution Report for {interaction.guild.name}**\nGenerated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\nThis report contains guild loot distribution data and analytics.",
+                    attachments=[discord.File(file_path, filename=filename)]
+                )
+                
+                # Clean up file
+                os.remove(file_path)
+            else:
+                await interaction.edit_original_response(content="❌ Failed to generate Excel file. Please check the data files.")
+            
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Error generating loot report: {str(e)[:100]}...")
+            logger.error(f"Error in loot button: {e}", exc_info=True)
     
     @discord.ui.button(label='Get All', style=discord.ButtonStyle.success, emoji='📦')
     async def get_all_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1148,8 +1292,43 @@ class BotManagementView(discord.ui.View):
             await interaction.response.send_message("❌ You don't have permission to use this feature. Required roles: Officer or Guild Leader.", ephemeral=True)
             return
         
-        # Placeholder implementation
-        await interaction.response.send_message("📦 **Get All** feature is coming soon!\n\nThis will provide a comprehensive export of all guild data and reports.", ephemeral=True)
+        # This button does the same as Get Attendance for now (generates the main Excel file)
+        try:
+            # Get guild-specific data
+            guild_id = interaction.guild.id
+            paths = get_guild_file_paths(guild_id)
+            
+            # Initialize guild data if needed
+            initialize_guild_data_files(guild_id)
+            
+            # Generate Excel for this guild
+            await interaction.response.send_message("📦 Generating comprehensive guild data export for this server...", ephemeral=True)
+            
+            # Create guild-specific Excel (All types)
+            workbook = createExcel(guild_id, "All")
+            
+            if workbook:
+                # Save and send the file
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"complete_guild_export_{interaction.guild.name}_{timestamp}.xlsx"
+                file_path = os.path.join(paths['sheet_dir'], filename)
+                
+                workbook.save(file_path)
+                
+                # Edit the original message to send the file
+                await interaction.edit_original_response(
+                    content=f"📦 **Complete Guild Data Export for {interaction.guild.name}**\nGenerated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\nThis file contains all available guild data including attendance, armory items, and performance statistics.",
+                    attachments=[discord.File(file_path, filename=filename)]
+                )
+                
+                # Clean up file
+                os.remove(file_path)
+            else:
+                await interaction.edit_original_response(content="❌ Failed to generate Excel file. Please check the data files.")
+            
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Error generating comprehensive export: {str(e)[:100]}...")
+            logger.error(f"Error in get all button: {e}", exc_info=True)
 
 @bot.command()
 async def setupHopium(ctx):
@@ -1337,7 +1516,7 @@ async def get_file_data(ctx, data_type: str = None):
     if data_type not in ['armory', 'icons', 'tmb', 'parses']:
         embed = discord.Embed(
             title="📋 Available Data Types",
-            description="Choose from available data file types:",
+            description=f"Choose from available data file types for **{ctx.guild.name}**:",
             color=0xff9900
         )
         embed.add_field(
@@ -1350,6 +1529,12 @@ async def get_file_data(ctx, data_type: str = None):
             value="`!uploadtmb` - Upload TMB files (character-json.json, hopium-attendance.csv, item-notes.csv)\n`!uploadarmory` - Upload armory.json file (merges with existing data)",
             inline=False
         )
+        embed.add_field(
+            name="🏰 Server Info",
+            value=f"**Guild:** {ctx.guild.name}\n**All data operations are server-specific**",
+            inline=False
+        )
+        embed.set_footer(text=f"Guild: {ctx.guild.name} • Data is server-specific")
         await ctx.send(embed=embed, delete_after=15)
         try:
             await ctx.message.delete()
@@ -1357,14 +1542,21 @@ async def get_file_data(ctx, data_type: str = None):
             pass
         return
     
+    # Get guild-specific file paths
+    guild_id = ctx.guild.id
+    paths = get_guild_file_paths(guild_id)
+    
+    # Initialize guild data if needed
+    initialize_guild_data_files(guild_id)
+    
     try:
         # Handle TMB files differently (zip archive)
         if data_type == 'tmb':
-            # Define TMB files
+            # Define TMB files using guild-specific paths
             tmb_files = [
-                (CHARACTER_FILE, 'character-json.json'),
-                (ATTENDANCE_FILE, 'hopium-attendance.csv'),
-                (ITEM_FILE, 'item-notes.csv')
+                (paths['character_file'], 'character-json.json'),
+                (paths['attendance_file'], 'hopium-attendance.csv'),
+                (paths['item_file'], 'item-notes.csv')
             ]
             
             # Check which files exist
@@ -1383,10 +1575,10 @@ async def get_file_data(ctx, data_type: str = None):
                 await ctx.send("❌ No TMB files found. Ensure the TMB directory contains data files.", delete_after=15)
                 return
             
-            # Create zip file
+            # Create zip file in guild-specific directory
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            zip_filename = f"tmb_data_{timestamp}.zip"
-            zip_path = os.path.join(CACHE_DIR, zip_filename)
+            zip_filename = f"tmb_data_{ctx.guild.name}_{timestamp}.zip"
+            zip_path = os.path.join(paths['sheet_dir'], zip_filename)
             
             try:
                 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -1452,17 +1644,17 @@ async def get_file_data(ctx, data_type: str = None):
                 raise e
         
         else:
-            # Handle single files (armory, icons, parses)
+            # Handle single files (armory, icons, parses) using guild-specific paths
             if data_type == 'armory':
-                file_path = ARMORY_FILE
+                file_path = paths['armory_file']
                 file_type = "Armory"
                 icon = "🛡️"
             elif data_type == 'icons':
-                file_path = ITEM_ICONS_FILE
+                file_path = paths['item_icons_file']
                 file_type = "Item Icons"
                 icon = "🖼️"
             elif data_type == 'parses':
-                file_path = PARSES_FILE
+                file_path = paths['parses_file']
                 file_type = "WCL Parses"
                 icon = "📊"
             
@@ -1601,7 +1793,7 @@ async def get_player_data(ctx, data_type: str = None, player_name: str = None):
     if data_type not in ['armory', 'parses'] or not player_name:
         embed = discord.Embed(
             title="📋 Player Data Lookup",
-            description="Use `!get <type> <playerName>` to retrieve specific player's data.",
+            description=f"Use `!get <type> <playerName>` to retrieve specific player's data from **{ctx.guild.name}**.",
             color=0xff9900
         )
         embed.add_field(
@@ -1614,6 +1806,12 @@ async def get_player_data(ctx, data_type: str = None, player_name: str = None):
             value="`!get armory Karumenta` - Get Karumenta's items\n`!get parses Karumenta` - Get Karumenta's performance data",
             inline=False
         )
+        embed.add_field(
+            name="🏰 Server Info",
+            value=f"**Guild:** {ctx.guild.name}\n**Data is specific to this server**",
+            inline=False
+        )
+        embed.set_footer(text=f"Guild: {ctx.guild.name} • Data is server-specific")
         await ctx.send(embed=embed, delete_after=15)
         try:
             await ctx.message.delete()
@@ -1621,14 +1819,21 @@ async def get_player_data(ctx, data_type: str = None, player_name: str = None):
             pass
         return
     
+    # Get guild-specific file paths
+    guild_id = ctx.guild.id
+    paths = get_guild_file_paths(guild_id)
+    
+    # Initialize guild data if needed
+    initialize_guild_data_files(guild_id)
+    
     try:
         # Determine which file to use based on data type
         if data_type == 'armory':
-            file_path = ARMORY_FILE
+            file_path = paths['armory_file']
             file_type = "Armory"
             icon = "🛡️"
         elif data_type == 'parses':
-            file_path = PARSES_FILE
+            file_path = paths['parses_file']
             file_type = "WCL Parses"
             icon = "📊"
         
@@ -1853,11 +2058,18 @@ async def upload_tmb_files(ctx):
             pass
         return
     
+    # Get guild-specific file paths
+    guild_id = ctx.guild.id
+    paths = get_guild_file_paths(guild_id)
+    
+    # Initialize guild data if needed
+    initialize_guild_data_files(guild_id)
+    
     # Check if files are attached
     if not ctx.message.attachments:
         embed = discord.Embed(
             title="📤 TMB File Upload",
-            description="Upload TMB data files to update the guild database.",
+            description=f"Upload TMB data files to update the **{ctx.guild.name}** guild database.",
             color=0xff9900
         )
         embed.add_field(
@@ -1875,6 +2087,12 @@ async def upload_tmb_files(ctx):
             value="Only files with matching names will be updated. Invalid files will be rejected.",
             inline=False
         )
+        embed.add_field(
+            name="🏰 Server Info",
+            value=f"**Guild:** {ctx.guild.name}\n**Files will be uploaded to this server's data only**",
+            inline=False
+        )
+        embed.set_footer(text=f"Guild: {ctx.guild.name} • Data is server-specific")
         await ctx.send(embed=embed, delete_after=30)
         try:
             await ctx.message.delete()
@@ -1892,11 +2110,11 @@ async def upload_tmb_files(ctx):
         return
     
     try:
-        # Define valid TMB files
+        # Define valid TMB files using guild-specific paths
         valid_files = {
-            'character-json.json': (CHARACTER_FILE, 'json'),
-            'hopium-attendance.csv': (ATTENDANCE_FILE, 'csv'),
-            'item-notes.csv': (ITEM_FILE, 'csv')
+            'character-json.json': (paths['character_file'], 'json'),
+            'hopium-attendance.csv': (paths['attendance_file'], 'csv'),
+            'item-notes.csv': (paths['item_file'], 'csv')
         }
         
         processed_files = []
@@ -2119,11 +2337,18 @@ async def upload_armory_file(ctx):
             pass
         return
     
+    # Get guild-specific file paths
+    guild_id = ctx.guild.id
+    paths = get_guild_file_paths(guild_id)
+    
+    # Initialize guild data if needed
+    initialize_guild_data_files(guild_id)
+    
     # Check if file is attached
     if not ctx.message.attachments:
         embed = discord.Embed(
             title="📤 Armory File Upload",
-            description="Upload an armory.json file to merge with existing guild armory data.",
+            description=f"Upload an armory.json file to merge with **{ctx.guild.name}** guild armory data.",
             color=0xff9900
         )
         embed.add_field(
@@ -2146,6 +2371,12 @@ async def upload_armory_file(ctx):
             value="A timestamped backup of the current armory file will be created before merging.",
             inline=False
         )
+        embed.add_field(
+            name="🏰 Server Info",
+            value=f"**Guild:** {ctx.guild.name}\n**File will be merged with this server's data only**",
+            inline=False
+        )
+        embed.set_footer(text=f"Guild: {ctx.guild.name} • Data is server-specific")
         await ctx.send(embed=embed, delete_after=30)
         try:
             await ctx.message.delete()
@@ -2269,22 +2500,22 @@ async def upload_armory_file(ctx):
                 pass
             return
         
-        # Load existing armory data
+        # Load existing armory data using guild-specific paths
         existing_armory = {}
-        if os.path.exists(ARMORY_FILE):
+        if os.path.exists(paths['armory_file']):
             try:
-                with open(ARMORY_FILE, 'r', encoding='utf-8') as f:
+                with open(paths['armory_file'], 'r', encoding='utf-8') as f:
                     existing_armory = json.load(f)
             except (json.JSONDecodeError, FileNotFoundError):
                 existing_armory = {}
         
-        # Create backup before merging
+        # Create backup before merging using guild-specific paths
         backup_created = False
         backup_path = None
-        if os.path.exists(ARMORY_FILE):
+        if os.path.exists(paths['armory_file']):
             try:
-                backup_path = f"{ARMORY_FILE}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                with open(ARMORY_FILE, 'rb') as original:
+                backup_path = f"{paths['armory_file']}.backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                with open(paths['armory_file'], 'rb') as original:
                     with open(backup_path, 'wb') as backup:
                         backup.write(original.read())
                 backup_created = True
@@ -2348,15 +2579,15 @@ async def upload_armory_file(ctx):
                     merged_armory[clean_player_name].extend(new_items)
                     merge_stats['updated_players'] += 1
         
-        # Save merged armory data
+        # Save merged armory data using guild-specific paths
         try:
             # Write to temporary file first for atomic operation
-            temp_file = ARMORY_FILE + '.tmp'
+            temp_file = paths['armory_file'] + '.tmp'
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(merged_armory, f, ensure_ascii=False, indent=2)
             
             # Atomic rename
-            os.replace(temp_file, ARMORY_FILE)
+            os.replace(temp_file, paths['armory_file'])
             
         except Exception as e:
             # Clean up temp file if it exists
@@ -2442,7 +2673,13 @@ async def upload_armory_file(ctx):
         except discord.NotFound:
             pass
 
-def createExcel():
+def createExcel(guild_id, excelType):
+    """Create Excel file with guild-specific data"""
+    # Get guild-specific file paths
+    paths = get_guild_file_paths(guild_id)
+    
+    # Initialize guild data if needed
+    initialize_guild_data_files(guild_id)
     players = {}
     wowClasses = []
 
@@ -2471,7 +2708,7 @@ def createExcel():
                 print("❌ Failed to get Blizzard API token after 3 attempts")
                 return
 
-    with open(ITEM_ICONS_FILE, 'r', encoding='utf-8') as f:
+    with open(paths['item_icons_file'], 'r', encoding='utf-8') as f:
         try:
             itemsIcons = json.load(f)
             if not itemsIcons:
@@ -2480,7 +2717,7 @@ def createExcel():
             print("Warning: item-icons.json is corrupted or invalid. Starting with empty icons map.")
             itemsIcons = {}
 
-    with open(PARSES_FILE, 'r', encoding='utf-8') as f:
+    with open(paths['parses_file'], 'r', encoding='utf-8') as f:
         try:
             playerParse = json.load(f)
             if not playerParse:
@@ -2490,7 +2727,7 @@ def createExcel():
             playerParse = {}
 
     #Attendance Start
-    with open(ATTENDANCE_FILE, newline='', encoding='utf-8') as csvfile:
+    with open(paths['attendance_file'], newline='', encoding='utf-8') as csvfile:
         csvreader = csv.reader(csvfile, delimiter=',', quotechar='|')
         
         firstRow = next(csvreader)
@@ -2538,7 +2775,7 @@ def createExcel():
     
     #Loot Start
     playerData = ""
-    with open(CHARACTER_FILE, 'r', encoding='utf-8') as file:
+    with open(paths['character_file'], 'r', encoding='utf-8') as file:
         playerData = json.load(file)
     
     for playerInfo in playerData :
@@ -2784,181 +3021,187 @@ def createExcel():
     
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "HopiumInfo"
-    sheet.auto_filter.ref = "A1:BZ1"
     
-    sorted_data = sorted(playerInfoList, key=lambda x: (x[1], x[5]), reverse=True)
-        
-    for col_num, column_name in enumerate(column_names, start=1):
-        cell = sheet.cell(row=1, column=col_num, value=column_name)
-        cell.fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
-        cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        #cell.fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
-
-    for row_num, row_data in enumerate(sorted_data, start=2):
-        for col_num, cell_value in enumerate(row_data, start=1):
-            cell = sheet.cell(row=row_num, column=col_num, value=cell_value)
+    if excelType == "Attendance" or excelType == "All" :
+        sheet.title = "Attendance"
+        sheet.auto_filter.ref = "A1:BZ1"
+    
+        sorted_data = sorted(playerInfoList, key=lambda x: (x[1], x[5]), reverse=True)
             
-            cell.alignment = Alignment(horizontal="center")        
-            if col_num == 4 or col_num == 5 or col_num == 8 or col_num == 11 or col_num == 12:
-                for row in range(2, len(players) + 2):
-                    sheet.cell(row=row, column=col_num).number_format = "0"  # Numeric format
-            if col_num == 6:
-                for row in range(2, len(players) + 2):
-                    sheet.cell(row=row, column=col_num).number_format = "0.00%"
-            if col_num == 9 or col_num == 13:
-                for row in range(2, len(players) + 2):
-                    sheet.cell(row=row, column=col_num).number_format = "DD/MM"
+        for col_num, column_name in enumerate(column_names, start=1):
+            cell = sheet.cell(row=1, column=col_num, value=column_name)
+            cell.fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+            cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            #cell.fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
 
-
-    column_sizes = {
-        "Name": 22,
-        "Class": 12,
-        "Race": 12,
-        "Raids": 14,
-        "Benched": 14,
-        "Attendance": 16,
-        "Items (+OS)": 14,
-        "MS Ratio": 14,
-        "Last MS": 14,
-        "Whishlist": 14,
-        "Best avg parse": 18,
-        "Median avr parse": 18,
-        "OS Items": 16,
-        "OS Ratio": 14,
-        "Last Bench": 16,
-        "Default": 14
-    }
-    # Adjust column widths
-    for col_num, column_name in enumerate(column_names, start=1):
-        column_letter = get_column_letter(col_num)
-        
-        try:
-            size = column_sizes[column_name]
-        except:
-            size = column_sizes["Default"]
-                       
-        sheet.column_dimensions[column_letter].width = max(len(column_name), size)
-        
-        for row in range(2, 80):
-            cell = sheet[column_letter + str(row)]
-            if cell.value is not None:
-                cell.alignment = Alignment(horizontal="center")
-
-                thin_border = Side(border_style="thin", color="000000")  # Black thin border
-                cell.border = Border(top=thin_border, bottom=thin_border, left=thin_border, right=thin_border)
+        for row_num, row_data in enumerate(sorted_data, start=2):
+            for col_num, cell_value in enumerate(row_data, start=1):
+                cell = sheet.cell(row=row_num, column=col_num, value=cell_value)
                 
-                cell.font = Font(name="Aptos Light", bold=False)
+                cell.alignment = Alignment(horizontal="center")        
+                if col_num == 4 or col_num == 5 or col_num == 8 or col_num == 11 or col_num == 12:
+                    for row in range(2, len(players) + 2):
+                        sheet.cell(row=row, column=col_num).number_format = "0"  # Numeric format
+                if col_num == 6:
+                    for row in range(2, len(players) + 2):
+                        sheet.cell(row=row, column=col_num).number_format = "0.00%"
+                if col_num == 9 or col_num == 13:
+                    for row in range(2, len(players) + 2):
+                        sheet.cell(row=row, column=col_num).number_format = "DD/MM"
+
+
+        column_sizes = {
+            "Name": 22,
+            "Class": 12,
+            "Race": 12,
+            "Raids": 14,
+            "Benched": 14,
+            "Attendance": 16,
+            "Items (+OS)": 14,
+            "MS Ratio": 14,
+            "Last MS": 14,
+            "Whishlist": 14,
+            "Best avg parse": 18,
+            "Median avr parse": 18,
+            "OS Items": 16,
+            "OS Ratio": 14,
+            "Last Bench": 16,
+            "Default": 14
+        }
+        # Adjust column widths
+        for col_num, column_name in enumerate(column_names, start=1):
+            column_letter = get_column_letter(col_num)
+            
+            try:
+                size = column_sizes[column_name]
+            except:
+                size = column_sizes["Default"]
+                        
+            sheet.column_dimensions[column_letter].width = max(len(column_name), size)
+            
+            for row in range(2, 80):
+                cell = sheet[column_letter + str(row)]
+                if cell.value is not None:
+                    cell.alignment = Alignment(horizontal="center")
+
+                    thin_border = Side(border_style="thin", color="000000")  # Black thin border
+                    cell.border = Border(top=thin_border, bottom=thin_border, left=thin_border, right=thin_border)
                     
-                if column_name == "Name" or column_name == "Class":
-                    value = cell.value
-                    if column_name == "Name":
-                        cell.alignment = Alignment(horizontal="left")
-                        cell.font = Font(name="Aptos", bold=True)
-                        value = sheet["B" + str(row)].value
-                    bgcolor = "CCCCCC"
-                    if value == "Druid":
-                        bgcolor = "FF7C0A"
-                    elif value == "Hunter":
-                        bgcolor = "AAD372"
-                    elif value == "Mage":
-                        bgcolor = "3FC7EB"
-                    elif value == "Paladin":
-                        bgcolor = "F48CBA"
-                    elif value == "Priest":
-                        bgcolor = "FFFFFF"
-                    elif value == "Rogue":
-                        bgcolor = "FFF468"
-                    elif value == "Shaman":
-                        bgcolor = "0070DD"
-                    elif value == "Warlock":
-                        bgcolor = "8788EE"
-                    elif value == "Warrior":
-                        bgcolor = "C69B6D"
-                    cell.fill = PatternFill(start_color=bgcolor, end_color=bgcolor, fill_type="solid")
-                elif column_name == "Race":
-                    bgcolor = "CCCCCC"
-                    if cell.value == "Dwarf":
-                        bgcolor = "C69B6D"
-                    elif cell.value == "Gnome":
-                        bgcolor = "FFF468"
-                    elif cell.value == "Human":
-                        bgcolor = "F48CBA"
-                    elif cell.value == "Night Elf":
-                        bgcolor = "0070DD"
-                    elif cell.value == "Orc":
-                        bgcolor = "AAD372"
-                    elif cell.value == "Tauren":
-                        bgcolor = "C69B6D"
-                    elif cell.value == "Troll":
-                        bgcolor = "FFFFFF"
-                    elif cell.value == "Undead":
-                        bgcolor = "8788EE"
-                    cell.fill = PatternFill(start_color=bgcolor, end_color=bgcolor, fill_type="solid")
-                elif column_name == "Attendance":
-                    start_color = (255, 156, 0)
-                    end_color = (117, 249, 77)
-                    percentage = cell.value
-                    color = calculate_gradient_color(percentage, start_color, end_color)
-                    cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
-                elif column_name == "MS Ratio":
-                    start_color = (255, 255, 255)
-                    end_color = (186, 72, 177) 
-                    percentage = float(cell.value)
-                    color = calculate_gradient_color(percentage, start_color, end_color)
-                    cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
-                elif column_name == "Wishlist":
-                    if cell.value == "0/0":
-                        cell.value = "Empty"
-                        cell.fill = PatternFill(start_color="FF9C00", end_color="FF9C00", fill_type="solid")
-                    elif cell.value.split("/")[0] == cell.value.split("/")[1]:
-                        cell.fill = PatternFill(start_color="75F94D", end_color="75F94D", fill_type="solid")
-                elif column_name == "Best avg parse" or column_name == "Median avr parse":
-                    start_color = (255, 255, 255)
-                    end_color = (66, 133, 244) 
-                    value = float(cell.value)
-                    color = "66664E"
-                    if value == 100:
-                        color = "E5A93F"
-                    elif value >= 99:
-                        color = "BE49A8"
-                    elif value >= 95:
-                        color = "FF8000"
-                    elif value >= 75:
-                        color = "A335EE"
-                    elif value >= 50:
-                        color = "0961FE"
-                    elif value >= 25:
-                        color = "0961FE"
-                    cell.font = Font(name="Aptos", bold=True, color=color)
-                elif col_num > 14: # N
-                    bgcolor = "CCCCCC"
-                    cell.font = Font(name="Aptos Light", bold=True)
-                    if cell.value == "N/A":
-                        bgcolor = "FFFFFF"
-                        cell.value = ""
-                    elif cell.value == "Benched":
-                        bgcolor = "9DC0FA"
-                    elif cell.value == "Absent":
-                        bgcolor = "FF9C00"
-                    elif cell.value == "Holiday":
-                        bgcolor = "00FFFF"
-                    elif cell.value == "-":
-                        bgcolor = "A1FB8E"
-                    else:
-                        bgcolor = "75F94D"
-                        if cell.value.startswith("0"):
-                            cell.font = Font(name="Aptos Light", bold=False)
-                    cell.fill = PatternFill(start_color=bgcolor, end_color=bgcolor, fill_type="solid")
-    print("Create attendance sheet with " + str(len(players)) + " players.")
+                    cell.font = Font(name="Aptos Light", bold=False)
+                        
+                    if column_name == "Name" or column_name == "Class":
+                        value = cell.value
+                        if column_name == "Name":
+                            cell.alignment = Alignment(horizontal="left")
+                            cell.font = Font(name="Aptos", bold=True)
+                            value = sheet["B" + str(row)].value
+                        bgcolor = "CCCCCC"
+                        if value == "Druid":
+                            bgcolor = "FF7C0A"
+                        elif value == "Hunter":
+                            bgcolor = "AAD372"
+                        elif value == "Mage":
+                            bgcolor = "3FC7EB"
+                        elif value == "Paladin":
+                            bgcolor = "F48CBA"
+                        elif value == "Priest":
+                            bgcolor = "FFFFFF"
+                        elif value == "Rogue":
+                            bgcolor = "FFF468"
+                        elif value == "Shaman":
+                            bgcolor = "0070DD"
+                        elif value == "Warlock":
+                            bgcolor = "8788EE"
+                        elif value == "Warrior":
+                            bgcolor = "C69B6D"
+                        cell.fill = PatternFill(start_color=bgcolor, end_color=bgcolor, fill_type="solid")
+                    elif column_name == "Race":
+                        bgcolor = "CCCCCC"
+                        if cell.value == "Dwarf":
+                            bgcolor = "C69B6D"
+                        elif cell.value == "Gnome":
+                            bgcolor = "FFF468"
+                        elif cell.value == "Human":
+                            bgcolor = "F48CBA"
+                        elif cell.value == "Night Elf":
+                            bgcolor = "0070DD"
+                        elif cell.value == "Orc":
+                            bgcolor = "AAD372"
+                        elif cell.value == "Tauren":
+                            bgcolor = "C69B6D"
+                        elif cell.value == "Troll":
+                            bgcolor = "FFFFFF"
+                        elif cell.value == "Undead":
+                            bgcolor = "8788EE"
+                        cell.fill = PatternFill(start_color=bgcolor, end_color=bgcolor, fill_type="solid")
+                    elif column_name == "Attendance":
+                        start_color = (255, 156, 0)
+                        end_color = (117, 249, 77)
+                        percentage = cell.value
+                        color = calculate_gradient_color(percentage, start_color, end_color)
+                        cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+                    elif column_name == "MS Ratio":
+                        start_color = (255, 255, 255)
+                        end_color = (186, 72, 177) 
+                        percentage = float(cell.value)
+                        color = calculate_gradient_color(percentage, start_color, end_color)
+                        cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+                    elif column_name == "Wishlist":
+                        if cell.value == "0/0":
+                            cell.value = "Empty"
+                            cell.fill = PatternFill(start_color="FF9C00", end_color="FF9C00", fill_type="solid")
+                        elif cell.value.split("/")[0] == cell.value.split("/")[1]:
+                            cell.fill = PatternFill(start_color="75F94D", end_color="75F94D", fill_type="solid")
+                    elif column_name == "Best avg parse" or column_name == "Median avr parse":
+                        start_color = (255, 255, 255)
+                        end_color = (66, 133, 244) 
+                        value = float(cell.value)
+                        color = "66664E"
+                        if value == 100:
+                            color = "E5A93F"
+                        elif value >= 99:
+                            color = "BE49A8"
+                        elif value >= 95:
+                            color = "FF8000"
+                        elif value >= 75:
+                            color = "A335EE"
+                        elif value >= 50:
+                            color = "0961FE"
+                        elif value >= 25:
+                            color = "0961FE"
+                        cell.font = Font(name="Aptos", bold=True, color=color)
+                    elif col_num > 14: # N
+                        bgcolor = "CCCCCC"
+                        cell.font = Font(name="Aptos Light", bold=True)
+                        if cell.value == "N/A":
+                            bgcolor = "FFFFFF"
+                            cell.value = ""
+                        elif cell.value == "Benched":
+                            bgcolor = "9DC0FA"
+                        elif cell.value == "Absent":
+                            bgcolor = "FF9C00"
+                        elif cell.value == "Holiday":
+                            bgcolor = "00FFFF"
+                        elif cell.value == "-":
+                            bgcolor = "A1FB8E"
+                        else:
+                            bgcolor = "75F94D"
+                            if cell.value.startswith("0"):
+                                cell.font = Font(name="Aptos Light", bold=False)
+                        cell.fill = PatternFill(start_color=bgcolor, end_color=bgcolor, fill_type="solid")
+        print("Create attendance sheet with " + str(len(players)) + " players.")
+    else:
+        # If we're not creating an attendance sheet, remove the empty active sheet
+        # We'll add other sheets later, so this prevents an empty first sheet
+        workbook.remove(sheet)
     #First Sheet Stop
 
     # Item Sheets Start
     # Loading file
     itemList = {}
 
-    with open(ITEM_FILE, newline='', encoding='utf-8') as csvfile:
+    with open(paths['item_file'], newline='', encoding='utf-8') as csvfile:
         csvreader = csv.reader(csvfile, delimiter=',', quotechar='"')
         
         firstRow = next(csvreader)
@@ -2987,7 +3230,7 @@ def createExcel():
     # Loading file finish
 
     #Load armory cache
-    with open(ARMORY_FILE, 'r', encoding='utf-8') as f:
+    with open(paths['armory_file'], 'r', encoding='utf-8') as f:
         try:
             armoryList = json.load(f)
             if not armoryList:
@@ -2997,288 +3240,77 @@ def createExcel():
             armoryList = {}
 
 
-    # Create loot items sheet
-    allLootSheet = workbook.create_sheet(title="Loot")
-    raidList = {
-        "Molten Core": "E26B0A",
-        "Blackwing Lair": "C0504D",
-        "Temple of Ahn'Qiraj": "4F6228",
-        "Naxxramas": "403151"
-        }
+    if excelType == "Loot" or excelType == "All" :
+        # Create loot items sheet
+        allLootSheet = workbook.create_sheet(title="Loot")
+        raidList = {
+            "Molten Core": "E26B0A",
+            "Blackwing Lair": "C0504D",
+            "Temple of Ahn'Qiraj": "4F6228",
+            "Naxxramas": "403151"
+            }
 
-    i = 1
-    for raid in raidList.keys():
-        raidItems = {}
-        for itemId, item in itemList.items():
-            print(item["itemInstance"])
-            if item["itemInstance"] == raid:
-                raidItems[itemId] = item
-        if not raidItems:
-            continue
-        allLootSheet.merge_cells(start_row=i, start_column=1, end_row=i, end_column=5)
-        cell = allLootSheet.cell(row=i, column=1, value=raid)
-        cell.fill = PatternFill(start_color=raidList[raid], end_color=raidList[raid], fill_type="solid")
-        i += 1
-        for raidItem in raidItems.values():
-            raidItemName = raidItem["itemName"]
-            raidItemClasses = raidItem["itemOffNotes"]
-            lootRow = ["", raidItem["itemId"], raidItemName, raidItem["itemNotes"] ,raidItem["itemTier"], "","",""]
-            for player in players.values():
-                if player["class"] is None or player["class"] not in raidItemClasses:
-                    continue
-                playerName = player["name"].capitalize()
-                found = False
-                try:
-                    playerArmory = armoryList[playerName]
-                except KeyError:
-                    playerArmory = []
-                    armoryList[playerName] = playerArmory
-                for armoryItem in armoryList[playerName]:
-                    if armoryItem == raidItemName:
-                        found = True
-                    elif raidItemName == "Head of Nefarian":
-                        if armoryItem == "Master Dragonslayer's Medallion" or armoryItem == "Master Dragonslayer's Orb" or armoryItem == "Master Dragonslayer's Ring":
-                            found = True
-
-                for loot in player["loot"].values():
-                    if loot["name"] == raidItemName:
-                        found = True
-                if not found:
-                    lootRow.append(f'{playerName} ({player["attendance"]}% - {player["msRatio"]})')
-                
-            allLootSheet.append(lootRow)
+        i = 1
+        for raid in raidList.keys():
+            raidItems = {}
+            for itemId, item in itemList.items():
+                if item["itemInstance"] == raid:
+                    raidItems[itemId] = item
+            if not raidItems:
+                continue
+            allLootSheet.merge_cells(start_row=i, start_column=1, end_row=i, end_column=5)
+            cell = allLootSheet.cell(row=i, column=1, value=raid)
+            cell.fill = PatternFill(start_color=raidList[raid], end_color=raidList[raid], fill_type="solid")
             i += 1
+            for raidItem in raidItems.values():
+                raidItemName = raidItem["itemName"]
+                raidItemClasses = raidItem["itemOffNotes"]
+                lootRow = ["", raidItem["itemId"], raidItemName, raidItem["itemNotes"] ,raidItem["itemTier"], "","",""]
+                for player in players.values():
+                    if player["class"] is None or player["class"] not in raidItemClasses:
+                        continue
+                    playerName = player["name"].capitalize()
+                    found = False
+                    try:
+                        playerArmory = armoryList[playerName]
+                    except KeyError:
+                        playerArmory = []
+                        armoryList[playerName] = playerArmory
+                    for armoryItem in armoryList[playerName]:
+                        if armoryItem == raidItemName:
+                            found = True
+                        elif raidItemName == "Head of Nefarian":
+                            if armoryItem == "Master Dragonslayer's Medallion" or armoryItem == "Master Dragonslayer's Orb" or armoryItem == "Master Dragonslayer's Ring":
+                                found = True
 
-    instanceColor = raidList.get("Molten Core", "E26B0A")
-    thin = Side(border_style="thin", color="000000")
-    for row in allLootSheet.iter_rows(min_row=1, max_row=allLootSheet.max_row):
-        if row[0].value is None or row[0].value == "" and row[1].value is None or row[1].value == "":
-            allLootSheet.row_dimensions[row[0].row].height = iconHeight
-            continue
+                    for loot in player["loot"].values():
+                        if loot["name"] == raidItemName:
+                            found = True
+                    if not found:
+                        lootRow.append(f'{playerName} ({player["attendance"]}% - {player["msRatio"]})')
+                    
+                allLootSheet.append(lootRow)
+                i += 1
 
-        if row[0].value is not None and row[0].value != "":
-            allLootSheet.row_dimensions[row[0].row].height = iconHeight
-            row[0].font = Font(name="Aptos", bold=True, color="FFFFFF",  size=16)
-            row[0].alignment = Alignment(horizontal="center", vertical="center")
-            instanceColor = row[0].fill.start_color.index
-            continue
+        instanceColor = raidList.get("Molten Core", "E26B0A")
+        thin = Side(border_style="thin", color="000000")
+        for row in allLootSheet.iter_rows(min_row=1, max_row=allLootSheet.max_row):
+            if row[0].value is None or row[0].value == "" and row[1].value is None or row[1].value == "":
+                allLootSheet.row_dimensions[row[0].row].height = iconHeight
+                continue
 
-        row[0].fill = PatternFill(start_color=instanceColor, end_color=instanceColor, fill_type="solid")
-        item_id_cell = row[1]  # Assuming itemId is in the first column
-        item_id = str(item_id_cell.value)
-        allLootSheet.row_dimensions[item_id_cell.row].height = iconHeight
-            
-        if item_id not in itemsIcons.keys():
-            try:
-                media_url = f'https://eu.api.blizzard.com/data/wow/media/item/{item_id}?namespace=static-classic-eu&locale=en_GB'
-                urlHeaders = {'Authorization': f'Bearer {access_token}'}
-                media_response = requests.get(media_url, headers=urlHeaders)
-                icon_url = media_response.json()['assets'][0]['value']
-                itemsIcons[item_id] = icon_url
-            except:
-                print("Error fetching media for loot item:", loot["name"])
+            if row[0].value is not None and row[0].value != "":
+                allLootSheet.row_dimensions[row[0].row].height = iconHeight
+                row[0].font = Font(name="Aptos", bold=True, color="FFFFFF",  size=16)
+                row[0].alignment = Alignment(horizontal="center", vertical="center")
+                instanceColor = row[0].fill.start_color.index
+                continue
 
-        icon_url = itemsIcons.get(item_id)
-        if icon_url:
-         # Set the cell to use the IMAGE formula
-            item_id_cell.value = f'=IMAGE("{icon_url}", 2)'
-        row[1].border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-        row[2].alignment = Alignment(horizontal="left", vertical="center")
-        row[2].font = Font(name="Aptos", bold=True)
-        row[2].border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-        if row[3].value is not None and row[3].value != "":
-            notes = row[3].value
-            row[3].value = '=IMAGE("https://render.worldofwarcraft.com/classic-eu/icons/56/inv_misc_questionmark.jpg", 2)'
-            row[3].comment = Comment(text=notes, author="")
-        else:
-            allLootSheet.merge_cells(start_row=item_id_cell.row, start_column=3, end_row=item_id_cell.row, end_column=4)
-        row[3].border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-        row[4].alignment = Alignment(horizontal="center", vertical="center")
-        row[4].font = Font(name="Aptos", bold=True)
-        row[4].border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-        if row[4].value == "1":
-            row[4].fill = PatternFill(start_color="32C3F6", end_color="32C3F6", fill_type="solid")
-        elif row[4].value == "2":
-            row[4].fill = PatternFill(start_color="20FF26", end_color="20FF26", fill_type="solid")
-        elif row[4].value == "3":
-            row[4].fill = PatternFill(start_color="F7FF26", end_color="F7FF26", fill_type="solid")
-        elif row[4].value == "4":
-            row[4].fill = PatternFill(start_color="FF734D", end_color="FF734D", fill_type="solid")
-        elif row[4].value == "5":
-            row[4].fill = PatternFill(start_color="F30026", end_color="F30026", fill_type="solid")
-        elif row[4].value == "6":
-            row[4].fill = PatternFill(start_color="CC3071", end_color="CC3071", fill_type="solid")
-
-        foundTheEnd = False
-        index = 8
-        while not foundTheEnd:
-            cell = row[index]
-            if cell.value is None or cell.value == "":
-                foundTheEnd = True
-            else:
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                cell.font = Font(name="Aptos", bold=True)
-                cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-                playerName = cell.value.split(" (")[0].strip()
-                player = players[playerName.capitalize()]
-                classColor = "CCCCCC"
-                if player["class"] == "Druid":
-                    classColor = "FF7C0A"
-                elif player["class"] == "Hunter":
-                    classColor = "AAD372"
-                elif player["class"] == "Mage":
-                    classColor = "3FC7EB"
-                elif player["class"] == "Paladin":
-                    classColor = "F48CBA"
-                elif player["class"] == "Priest":
-                    classColor = "FFFFFF"
-                elif player["class"] == "Rogue":
-                    classColor = "FFF468"
-                elif player["class"] == "Shaman":
-                    classColor = "0070DD"
-                elif player["class"] == "Warlock":
-                    classColor = "8788EE"
-                elif player["class"] == "Warrior":
-                    classColor = "C69B6D"
-                cell.fill = PatternFill(start_color=classColor, end_color=classColor, fill_type="solid")
-
-            index += 1
-            if index >= len(row):
-                foundTheEnd = True
-
-
-    for column in allLootSheet.columns:
-        column_letter = get_column_letter(column[0].column)
-        column_size = 30
-        if column_letter == "B" or column_letter == "D" or column_letter == "E":
-            column_size = 4.5
-        elif column_letter == "A":
-            column_size = 4
-        elif column_letter == "C":
-            column_size = 45
-        
-        allLootSheet.column_dimensions[column_letter].width = column_size
-
-    wowClasses.sort()
-    # Create item sheets
-    for wowClass in wowClasses:
-
-        classColor = "DDDDDD"
-        classBgColor = "DDDDDD"
-        fontColor = "000000"
-        if wowClass == "Druid":
-            classBgColor = "FF7C0A"
-        elif wowClass == "Hunter":
-            classBgColor = "AAD372"
-        elif wowClass == "Mage":
-            classBgColor = "3FC7EB"
-        elif wowClass == "Paladin":
-            classBgColor = "F48CBA"
-        elif wowClass == "Priest":
-            classBgColor = "FFFFFF"
-        elif wowClass == "Rogue":
-            classBgColor = "FFF468"
-        elif wowClass == "Shaman":
-            classBgColor = "0070DD"
-        elif wowClass == "Warlock":
-            classBgColor = "8788EE"
-        elif wowClass == "Warrior":
-            classBgColor = "C69B6D"
-
-
-        hasValues = False
-        classSheet = workbook.create_sheet(title=wowClass)
-
-        sheetPlayer = {}
-        
-        headers = [" ", " ", " ", " ", " "]
-        # Header
-        for player in players.values():
-            try:
-                if player["class"] == wowClass:
-                    sheetPlayer[player["name"].capitalize()] = player
-                    headers.append(player["name"].capitalize())
-            except KeyError:
-                print(f"Warning: Player {player} does not have a class defined. Skipping.")
-
-        headers.append(" ")
-
-                # Data
-        classItems = []
-        for itemId, item in itemList.items():
-        # Use 'item["itemOffNotes"]' instead of 'offNotes' and use 'in' for substring check
-            if wowClass in item.get("itemOffNotes", ""):
-                if hasValues == False:
-                    hasValues = True
-                classItems.append(item)
-
-        print("Class " + wowClass + " has " + str(len(classItems)) + " items.")
-        
-        for col_num, header in enumerate(headers, start=1):
-            thin = Side(border_style="thin", color="000000")
-
-            column_letter = get_column_letter(col_num)
-            cell = classSheet.cell(row=1, column=col_num, value=header)
-            if cell.value != " ":
-                cell.fill = PatternFill(start_color=classColor, end_color=classColor, fill_type="solid") 
-                cell.border = Border(thin, thin, thin, thin)
-            else:
-                cell.fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
-            cell.font = Font(name="Aptos", bold=True, color=fontColor)
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            
-            column_size = 16
-            if col_num == 1:
-                column_size = 4
-            elif col_num == 2:
-                column_size = 4.5
-            elif col_num == 3:
-                column_size = 45
-            elif col_num == 4:
-                column_size = 5
-            elif col_num == 5:
-                column_size = 5
-            elif col_num == len(sheetPlayer) + 6:
-                column_size = 4
-            classSheet.column_dimensions[column_letter].width = column_size
-        
-        totalRows = len(classItems) + 2
-        for item in classItems:
-            itemData = [""]
-            itemData.append(item["itemId"])
-            itemData.append(item["itemName"])
-            itemData.append(item["itemNotes"])
-            itemData.append(item["itemTier"])
-            classSheet.append(itemData)
-            #if item["itemNotes"]:
-            #    itemData = ["", ""]
-            #    itemData.append(item["itemNotes"])
-            #    totalRows += 1
-            #    classSheet.append(itemData)
-
-        
-        for row in classSheet.iter_rows(min_row=2, max_row=classSheet.max_row):
-            row[0].fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
-            row[len(sheetPlayer)+5].fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
+            row[0].fill = PatternFill(start_color=instanceColor, end_color=instanceColor, fill_type="solid")
             item_id_cell = row[1]  # Assuming itemId is in the first column
             item_id = str(item_id_cell.value)
-
-            classSheet.row_dimensions[item_id_cell.row].height = iconHeight
-            if item_id is None or item_id == "":
-                current_row = item_id_cell.row
-                start_col = 3
-                end_col = len(sheetPlayer) + 5
-                classSheet.merge_cells(start_row=current_row, start_column=start_col, end_row=current_row, end_column=end_col)
-                row[2].alignment = Alignment(horizontal="left", vertical="top")
-                row[2].font = Font(name="Aptos", bold=False)
-                row[2].fill = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid")
-                continue
-            
+            allLootSheet.row_dimensions[item_id_cell.row].height = iconHeight
+                
             if item_id not in itemsIcons.keys():
                 try:
                     media_url = f'https://eu.api.blizzard.com/data/wow/media/item/{item_id}?namespace=static-classic-eu&locale=en_GB'
@@ -3291,21 +3323,25 @@ def createExcel():
 
             icon_url = itemsIcons.get(item_id)
             if icon_url:
-             # Set the cell to use the IMAGE formula
+            # Set the cell to use the IMAGE formula
                 item_id_cell.value = f'=IMAGE("{icon_url}", 2)'
+            row[1].border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
             row[2].alignment = Alignment(horizontal="left", vertical="center")
             row[2].font = Font(name="Aptos", bold=True)
+            row[2].border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
             if row[3].value is not None and row[3].value != "":
                 notes = row[3].value
                 row[3].value = '=IMAGE("https://render.worldofwarcraft.com/classic-eu/icons/56/inv_misc_questionmark.jpg", 2)'
                 row[3].comment = Comment(text=notes, author="")
             else:
-                classSheet.merge_cells(start_row=item_id_cell.row, start_column=3, end_row=item_id_cell.row, end_column=4)
+                allLootSheet.merge_cells(start_row=item_id_cell.row, start_column=3, end_row=item_id_cell.row, end_column=4)
+            row[3].border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
             row[4].alignment = Alignment(horizontal="center", vertical="center")
             row[4].font = Font(name="Aptos", bold=True)
+            row[4].border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
             if row[4].value == "1":
                 row[4].fill = PatternFill(start_color="32C3F6", end_color="32C3F6", fill_type="solid")
@@ -3320,82 +3356,298 @@ def createExcel():
             elif row[4].value == "6":
                 row[4].fill = PatternFill(start_color="CC3071", end_color="CC3071", fill_type="solid")
 
-            for col_num in range(5, len(sheetPlayer) + 5):
-                currRow = row[col_num]
-                currRow.alignment = Alignment(horizontal="center", vertical="center")
+            foundTheEnd = False
+            index = 8
+            while not foundTheEnd:
+                cell = row[index]
+                if cell.value is None or cell.value == "":
+                    foundTheEnd = True
+                else:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    cell.font = Font(name="Aptos", bold=True)
+                    cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-                playerName = headers[col_num]
-                playerInfo = sheetPlayer[playerName]
-                row[col_num].value = "-"
+                    playerName = cell.value.split(" (")[0].strip()
+                    player = players[playerName.capitalize()]
+                    classColor = "CCCCCC"
+                    if player["class"] == "Druid":
+                        classColor = "FF7C0A"
+                    elif player["class"] == "Hunter":
+                        classColor = "AAD372"
+                    elif player["class"] == "Mage":
+                        classColor = "3FC7EB"
+                    elif player["class"] == "Paladin":
+                        classColor = "F48CBA"
+                    elif player["class"] == "Priest":
+                        classColor = "FFFFFF"
+                    elif player["class"] == "Rogue":
+                        classColor = "FFF468"
+                    elif player["class"] == "Shaman":
+                        classColor = "0070DD"
+                    elif player["class"] == "Warlock":
+                        classColor = "8788EE"
+                    elif player["class"] == "Warrior":
+                        classColor = "C69B6D"
+                    cell.fill = PatternFill(start_color=classColor, end_color=classColor, fill_type="solid")
 
-                try:
-                    playerArmory = armoryList[playerName]
-                except KeyError:
-                    playerArmory = []
-                    armoryList[playerName] = playerArmory
-                for armoryItem in armoryList[playerName]:
-                    found = False
-                    if armoryItem == row[2].value:
-                        found = True
-                    elif row[2].value == "Head of Nefarian":
-                        if armoryItem == "Master Dragonslayer's Medallion" or armoryItem == "Master Dragonslayer's Orb" or armoryItem == "Master Dragonslayer's Ring":
-                            found = True
-                    if found:
-                        row[col_num].value = "Equipped"
-                        row[col_num].fill = PatternFill(start_color="A1FB8E", end_color="A1FB8E", fill_type="solid")
-                        break
+                index += 1
+                if index >= len(row):
+                    foundTheEnd = True
 
-                for loot in playerInfo["loot"].values():
-                    if loot["name"] == row[2].value:
-                        row[col_num].value = "LC " + loot["receivedDate"]
-                        row[col_num].fill = PatternFill(start_color="75F94D", end_color="75F94D", fill_type="solid")
-                        break
+
+        for column in allLootSheet.columns:
+            column_letter = get_column_letter(column[0].column)
+            column_size = 30
+            if column_letter == "B" or column_letter == "D" or column_letter == "E":
+                column_size = 4.5
+            elif column_letter == "A":
+                column_size = 4
+            elif column_letter == "C":
+                column_size = 45
             
+            allLootSheet.column_dimensions[column_letter].width = column_size
 
-        for col_num in range(1, len(sheetPlayer) + 7):
-            finalCell = classSheet.cell(row=totalRows, column=col_num)
-            finalCell.fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
+    if excelType == "Class Items" or excelType == "All" :
+        wowClasses.sort()
+        # Create item sheets
+        for wowClass in wowClasses:
+
+            classColor = "DDDDDD"
+            classBgColor = "DDDDDD"
+            fontColor = "000000"
+            if wowClass == "Druid":
+                classBgColor = "FF7C0A"
+            elif wowClass == "Hunter":
+                classBgColor = "AAD372"
+            elif wowClass == "Mage":
+                classBgColor = "3FC7EB"
+            elif wowClass == "Paladin":
+                classBgColor = "F48CBA"
+            elif wowClass == "Priest":
+                classBgColor = "FFFFFF"
+            elif wowClass == "Rogue":
+                classBgColor = "FFF468"
+            elif wowClass == "Shaman":
+                classBgColor = "0070DD"
+            elif wowClass == "Warlock":
+                classBgColor = "8788EE"
+            elif wowClass == "Warrior":
+                classBgColor = "C69B6D"
 
 
-        # Define your data area
-        min_row = 1
-        max_row = classSheet.max_row
-        min_col = 1
-        max_col = classSheet.max_column
+            hasValues = False
+            classSheet = workbook.create_sheet(title=wowClass)
 
-        thick = Side(border_style="thick", color="000000")
-        thin = Side(border_style="thin", color="000000")
+            sheetPlayer = {}
+            
+            headers = [" ", " ", " ", " ", " "]
+            # Header
+            for player in players.values():
+                try:
+                    if player["class"] == wowClass:
+                        sheetPlayer[player["name"].capitalize()] = player
+                        headers.append(player["name"].capitalize())
+                except KeyError:
+                    print(f"Warning: Player {player} does not have a class defined. Skipping.")
 
-        for row in range(min_row, max_row + 1):
-            for col in range(min_col, max_col + 1):
-                cell = classSheet.cell(row=row, column=col)
+            headers.append(" ")
 
-                left_border = col == min_col + 1 and row > min_row and row < max_row
-                right_border = col == max_col - 1 and row > min_row and row < max_row
-                top_border = row == min_row + 1 and col > min_col and col < max_col
-                bottom_border = row == max_row - 1 and col > min_col and col < max_col
+                    # Data
+            classItems = []
+            for itemId, item in itemList.items():
+            # Use 'item["itemOffNotes"]' instead of 'offNotes' and use 'in' for substring check
+                if wowClass in item.get("itemOffNotes", ""):
+                    if hasValues == False:
+                        hasValues = True
+                    classItems.append(item)
 
-                if row > min_row and row < max_row and col > min_col and col < max_col:
+            print("Class " + wowClass + " has " + str(len(classItems)) + " items.")
+            
+            for col_num, header in enumerate(headers, start=1):
+                thin = Side(border_style="thin", color="000000")
+
+                column_letter = get_column_letter(col_num)
+                cell = classSheet.cell(row=1, column=col_num, value=header)
+                if cell.value != " ":
+                    cell.fill = PatternFill(start_color=classColor, end_color=classColor, fill_type="solid") 
                     cell.border = Border(thin, thin, thin, thin)
+                else:
+                    cell.fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
+                cell.font = Font(name="Aptos", bold=True, color=fontColor)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
                 
-                b = cell.border
-                border = Border(
-                    left=thick if (col == min_col or left_border) else b.left,
-                    right=thick if (col == max_col or right_border) else b.right,
-                    top=thick if (row == min_row or top_border) else b.top,
-                    bottom=thick if (row == max_row or bottom_border) else b.bottom,
-                )
-                cell.border = border
+                column_size = 16
+                if col_num == 1:
+                    column_size = 4
+                elif col_num == 2:
+                    column_size = 4.5
+                elif col_num == 3:
+                    column_size = 45
+                elif col_num == 4:
+                    column_size = 5
+                elif col_num == 5:
+                    column_size = 5
+                elif col_num == len(sheetPlayer) + 6:
+                    column_size = 4
+                classSheet.column_dimensions[column_letter].width = column_size
+            
+            totalRows = len(classItems) + 2
+            for item in classItems:
+                itemData = [""]
+                itemData.append(item["itemId"])
+                itemData.append(item["itemName"])
+                itemData.append(item["itemNotes"])
+                itemData.append(item["itemTier"])
+                classSheet.append(itemData)
+                #if item["itemNotes"]:
+                #    itemData = ["", ""]
+                #    itemData.append(item["itemNotes"])
+                #    totalRows += 1
+                #    classSheet.append(itemData)
 
-        if not hasValues:
-            print(f"No items found for class {wowClass}. Skipping sheet creation.")
-            workbook.remove(classSheet)
-            continue
+            
+            for row in classSheet.iter_rows(min_row=2, max_row=classSheet.max_row):
+                row[0].fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
+                row[len(sheetPlayer)+5].fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
+                item_id_cell = row[1]  # Assuming itemId is in the first column
+                item_id = str(item_id_cell.value)
+
+                classSheet.row_dimensions[item_id_cell.row].height = iconHeight
+                if item_id is None or item_id == "":
+                    current_row = item_id_cell.row
+                    start_col = 3
+                    end_col = len(sheetPlayer) + 5
+                    classSheet.merge_cells(start_row=current_row, start_column=start_col, end_row=current_row, end_column=end_col)
+                    row[2].alignment = Alignment(horizontal="left", vertical="top")
+                    row[2].font = Font(name="Aptos", bold=False)
+                    row[2].fill = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid")
+                    continue
+                
+                if item_id not in itemsIcons.keys():
+                    try:
+                        media_url = f'https://eu.api.blizzard.com/data/wow/media/item/{item_id}?namespace=static-classic-eu&locale=en_GB'
+                        urlHeaders = {'Authorization': f'Bearer {access_token}'}
+                        media_response = requests.get(media_url, headers=urlHeaders)
+                        icon_url = media_response.json()['assets'][0]['value']
+                        itemsIcons[item_id] = icon_url
+                    except:
+                        print("Error fetching media for loot item:", loot["name"])
+
+                icon_url = itemsIcons.get(item_id)
+                if icon_url:
+                # Set the cell to use the IMAGE formula
+                    item_id_cell.value = f'=IMAGE("{icon_url}", 2)'
+
+                row[2].alignment = Alignment(horizontal="left", vertical="center")
+                row[2].font = Font(name="Aptos", bold=True)
+
+                if row[3].value is not None and row[3].value != "":
+                    notes = row[3].value
+                    row[3].value = '=IMAGE("https://render.worldofwarcraft.com/classic-eu/icons/56/inv_misc_questionmark.jpg", 2)'
+                    row[3].comment = Comment(text=notes, author="")
+                else:
+                    classSheet.merge_cells(start_row=item_id_cell.row, start_column=3, end_row=item_id_cell.row, end_column=4)
+
+                row[4].alignment = Alignment(horizontal="center", vertical="center")
+                row[4].font = Font(name="Aptos", bold=True)
+
+                if row[4].value == "1":
+                    row[4].fill = PatternFill(start_color="32C3F6", end_color="32C3F6", fill_type="solid")
+                elif row[4].value == "2":
+                    row[4].fill = PatternFill(start_color="20FF26", end_color="20FF26", fill_type="solid")
+                elif row[4].value == "3":
+                    row[4].fill = PatternFill(start_color="F7FF26", end_color="F7FF26", fill_type="solid")
+                elif row[4].value == "4":
+                    row[4].fill = PatternFill(start_color="FF734D", end_color="FF734D", fill_type="solid")
+                elif row[4].value == "5":
+                    row[4].fill = PatternFill(start_color="F30026", end_color="F30026", fill_type="solid")
+                elif row[4].value == "6":
+                    row[4].fill = PatternFill(start_color="CC3071", end_color="CC3071", fill_type="solid")
+
+                for col_num in range(5, len(sheetPlayer) + 5):
+                    currRow = row[col_num]
+                    currRow.alignment = Alignment(horizontal="center", vertical="center")
+
+                    playerName = headers[col_num]
+                    playerInfo = sheetPlayer[playerName]
+                    row[col_num].value = "-"
+
+                    try:
+                        playerArmory = armoryList[playerName]
+                    except KeyError:
+                        playerArmory = []
+                        armoryList[playerName] = playerArmory
+                    for armoryItem in armoryList[playerName]:
+                        found = False
+                        if armoryItem == row[2].value:
+                            found = True
+                        elif row[2].value == "Head of Nefarian":
+                            if armoryItem == "Master Dragonslayer's Medallion" or armoryItem == "Master Dragonslayer's Orb" or armoryItem == "Master Dragonslayer's Ring":
+                                found = True
+                        if found:
+                            row[col_num].value = "Equipped"
+                            row[col_num].fill = PatternFill(start_color="A1FB8E", end_color="A1FB8E", fill_type="solid")
+                            break
+
+                    for loot in playerInfo["loot"].values():
+                        if loot["name"] == row[2].value:
+                            row[col_num].value = "LC " + loot["receivedDate"]
+                            row[col_num].fill = PatternFill(start_color="75F94D", end_color="75F94D", fill_type="solid")
+                            break
+                
+
+            for col_num in range(1, len(sheetPlayer) + 7):
+                finalCell = classSheet.cell(row=totalRows, column=col_num)
+                finalCell.fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
+
+
+            # Define your data area
+            min_row = 1
+            max_row = classSheet.max_row
+            min_col = 1
+            max_col = classSheet.max_column
+
+            thick = Side(border_style="thick", color="000000")
+            thin = Side(border_style="thin", color="000000")
+
+            for row in range(min_row, max_row + 1):
+                for col in range(min_col, max_col + 1):
+                    cell = classSheet.cell(row=row, column=col)
+
+                    left_border = col == min_col + 1 and row > min_row and row < max_row
+                    right_border = col == max_col - 1 and row > min_row and row < max_row
+                    top_border = row == min_row + 1 and col > min_col and col < max_col
+                    bottom_border = row == max_row - 1 and col > min_col and col < max_col
+
+                    if row > min_row and row < max_row and col > min_col and col < max_col:
+                        cell.border = Border(thin, thin, thin, thin)
+                    
+                    b = cell.border
+                    border = Border(
+                        left=thick if (col == min_col or left_border) else b.left,
+                        right=thick if (col == max_col or right_border) else b.right,
+                        top=thick if (row == min_row or top_border) else b.top,
+                        bottom=thick if (row == max_row or bottom_border) else b.bottom,
+                    )
+                    cell.border = border
+
+            if not hasValues:
+                print(f"No items found for class {wowClass}. Skipping sheet creation.")
+                workbook.remove(classSheet)
+                continue
     # Item Sheets Finish
 
     #Save cache item icons
-    with open(ITEM_ICONS_FILE, 'w', encoding='utf-8') as f:
+    with open(paths['item_icons_file'], 'w', encoding='utf-8') as f:
         json.dump(itemsIcons, f, ensure_ascii=False, indent=4)
+
+    # Ensure we have at least one sheet in the workbook
+    if len(workbook.worksheets) == 0:
+        # Create a minimal info sheet if no other sheets were created
+        info_sheet = workbook.create_sheet(title="Info")
+        info_sheet.cell(row=1, column=1, value="No data available for the requested report type.")
+        info_sheet.cell(row=2, column=1, value=f"Report type: {excelType}")
+        info_sheet.cell(row=3, column=1, value="Please check your data files and try again.")
 
     # Return the workbook for sending to Discord
     return workbook
