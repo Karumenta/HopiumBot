@@ -2828,9 +2828,9 @@ def createExcel(guild_id, excelType):
         if playerInfo["class"] is not None and not playerInfo["class"] in wowClasses:
             wowClasses.append(playerInfo["class"])
 
-        playerParse = playerParse.get(name, {})
-        player["bestPerformanceAverage"] = playerParse.get("bestPerformanceAverage", 0.0)
-        player["medianPerformanceAverage"] = playerParse.get("medianPerformanceAverage", 0.0)
+        playerParseData = playerParse.get(name, {})
+        player["bestPerformanceAverage"] = playerParseData.get("bestPerformanceAverage", 0.0)
+        player["medianPerformanceAverage"] = playerParseData.get("medianPerformanceAverage", 0.0)
 
         player["race"] = playerInfo["race"]
         player["class"] = playerInfo["class"]
@@ -3006,8 +3006,22 @@ def createExcel(guild_id, excelType):
         except:
             playerInfo.append("0/0")
         #Parse Info
-        playerInfo.append(player.get("bestPerformanceAverage", "-"))
-        playerInfo.append(player.get("medianPerformanceAverage", "-"))
+        best_avg = player.get("bestPerformanceAverage", 0)
+        median_avg = player.get("medianPerformanceAverage", 0)
+        
+        # Ensure values are numeric, default to 0 if not
+        try:
+            best_avg = float(best_avg) if best_avg not in [None, "", "-"] else 0
+        except (ValueError, TypeError):
+            best_avg = 0
+            
+        try:
+            median_avg = float(median_avg) if median_avg not in [None, "", "-"] else 0
+        except (ValueError, TypeError):
+            median_avg = 0
+        
+        playerInfo.append(f"{best_avg:.1f}" if best_avg != 0 else "-")
+        playerInfo.append(f"{median_avg:.1f}" if median_avg != 0 else "-")
         #Last bench
         playerInfo.append(lastBench)
         #Spacer
@@ -3151,9 +3165,10 @@ def createExcel(guild_id, excelType):
                     elif column_name == "MS Ratio":
                         start_color = (255, 255, 255)
                         end_color = (186, 72, 177) 
-                        percentage = float(cell.value)
-                        color = calculate_gradient_color(percentage, start_color, end_color)
-                        cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+                        if cell.value != "-" and cell.value is not None:
+                            percentage = float(cell.value)
+                            color = calculate_gradient_color(percentage, start_color, end_color)
+                            cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
                     elif column_name == "Wishlist":
                         if cell.value == "0/0":
                             cell.value = "Empty"
@@ -3161,23 +3176,24 @@ def createExcel(guild_id, excelType):
                         elif cell.value.split("/")[0] == cell.value.split("/")[1]:
                             cell.fill = PatternFill(start_color="75F94D", end_color="75F94D", fill_type="solid")
                     elif column_name == "Best avg parse" or column_name == "Median avr parse":
-                        start_color = (255, 255, 255)
-                        end_color = (66, 133, 244) 
-                        value = float(cell.value)
-                        color = "66664E"
-                        if value == 100:
-                            color = "E5A93F"
-                        elif value >= 99:
-                            color = "BE49A8"
-                        elif value >= 95:
-                            color = "FF8000"
-                        elif value >= 75:
-                            color = "A335EE"
-                        elif value >= 50:
-                            color = "0961FE"
-                        elif value >= 25:
-                            color = "0961FE"
-                        cell.font = Font(name="Aptos", bold=True, color=color)
+                        if cell.value != "-" and cell.value is not None:
+                            start_color = (255, 255, 255)
+                            end_color = (66, 133, 244) 
+                            value = float(cell.value)
+                            color = "66664E"
+                            if value == 100:
+                                color = "E5A93F"
+                            elif value >= 99:
+                                color = "BE49A8"
+                            elif value >= 95:
+                                color = "FF8000"
+                            elif value >= 75:
+                                color = "A335EE"
+                            elif value >= 50:
+                                color = "0961FE"
+                            elif value >= 25:
+                                color = "0961FE"
+                            cell.font = Font(name="Aptos", bold=True, color=color)
                     elif col_num > 14: # N
                         bgcolor = "CCCCCC"
                         cell.font = Font(name="Aptos Light", bold=True)
