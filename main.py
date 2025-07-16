@@ -278,7 +278,8 @@ async def process_guild_data(guild_id, paths):
     except (json.JSONDecodeError, FileNotFoundError) as e:
         print(f"❌ Error loading character file: {e}")
         return
-        
+    
+    try:
         # Check if required API credentials are available
         if not BLIZZARD_ID or not BLIZZARD_SECRET:
             error_msg = "Blizzard API credentials not available. Skipping armory update."
@@ -3304,6 +3305,12 @@ def createExcel(guild_id, excelType):
                             found = True
                         elif raidItemName == "Head of Nefarian":
                             if armoryItem == "Master Dragonslayer's Medallion" or armoryItem == "Master Dragonslayer's Orb" or armoryItem == "Master Dragonslayer's Ring":
+                                found = True
+                        elif raidItemName == "Eye of C'Thun":
+                            if armoryItem == "Amulet of the Fallen God" or armoryItem == "Cloak of the Fallen God" or armoryItem == "Ring of the Fallen God":
+                                found = True
+                        elif raidItemName == "Vek'nilash's Circlet":
+                            if armoryItem == "Conqueror's Crown" or armoryItem == "Doomcaller's Circlet" or armoryItem == "Enigma Circlet" or armoryItem == "Tiara of the Oracle":
                                 found = True
 
                     for loot in player["loot"].values():
