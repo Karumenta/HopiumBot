@@ -806,7 +806,7 @@ class ReviewView(discord.ui.View):
                 )
                 accept_embed.add_field(
                     name="🎯 TMB Setup Required",
-                    value="Please create a character on https://thatsmybis.com/ and add him to the guild from the home page. Once you do it notify us and feel free to create a wishlist for the current phase ( No Ony/ZG ). Thanks!",
+                    value="Please create a character on https://thatsmybis.com/ and add him to the guild from the home page. Once you do it notify us, Thanks!",
                     inline=False
                 )
                 accept_embed.add_field(
