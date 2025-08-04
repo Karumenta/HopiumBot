@@ -208,7 +208,7 @@ def initialize_guild_data_files(guild_id):
         logger.error(f"Error initializing data files for guild {guild_id}: {e}", exc_info=True)
 
 # Background task that runs every X minutes
-@tasks.loop(minutes=5)  # Reduced frequency - 1 minute is too aggressive for API calls
+@tasks.loop(minutes=15)  # Reduced frequency - 15 minutes is more suitable for API calls
 async def periodic_task():
     try:
         current_time = datetime.now().strftime('%H:%M:%S')
