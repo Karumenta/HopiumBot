@@ -13,6 +13,7 @@ import time
 import csv
 import requests
 import os
+import re
 import logging
 import zipfile
 
@@ -74,6 +75,18 @@ APPLICATION_QUESTIONS = [
     "Can someone in <Hopium> vouch for you?",
     "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
 ]
+
+CLASS_LIST = {
+    "Druid" : {"name": "Druid", "roles": ["DPS", "Heal", "Tank"], "color": "FF7C0A"},
+    "Hunter" : {"name": "Hunter", "roles": ["DPS"], "color": "AAD372"},
+    "Mage" : {"name": "Mage", "roles": ["DPS"], "color": "3FC7EB"},
+    "Paladin" : {"name": "Paladin", "roles": ["DPS", "Heal", "Tank"], "color": "F48CBA"},
+    "Priest" : {"name": "Priest", "roles": ["Heal", "DPS"], "color": "FFFFFF"},
+    "Rogue" : {"name": "Rogue", "roles": ["DPS"], "color": "FFF468"},
+    "Shaman" : {"name": "Shaman", "roles": ["DPS", "Heal"], "color": "0070DD"},
+    "Warlock" : {"name": "Warlock", "roles": ["DPS"], "color": "8788EE"},
+    "Warrior" : {"name": "Warrior", "roles": ["DPS", "Tank"], "color": "C69B6D"}
+}
 
 BLIZZARD_ID = os.getenv('BLIZZARD_ID')
 BLIZZARD_SECRET = os.getenv('BLIZZARD_SECRET')
@@ -2794,6 +2807,7 @@ def createExcel(guild_id, excelType):
             player = players[name]
         except:
             player["name"] = playerInfo["name"].capitalize()
+            player["role"] = playerInfo["archetype"]
             player["firstRaid"] = "31/12/30"
             player["raids"] = []
             player["benched_raids"] = []
@@ -2834,6 +2848,7 @@ def createExcel(guild_id, excelType):
         player["medianPerformanceAverage"] = playerParseData.get("medianPerformanceAverage", 0.0)
 
         player["race"] = playerInfo["race"]
+        player["role"] = playerInfo["archetype"]
         player["class"] = playerInfo["class"]
         player["is_alt"] = playerInfo["is_alt"]
         player["member_id"] = playerInfo["member_id"]
@@ -3118,25 +3133,7 @@ def createExcel(guild_id, excelType):
                             cell.alignment = Alignment(horizontal="left")
                             cell.font = Font(name="Aptos", bold=True)
                             value = sheet["B" + str(row)].value
-                        bgcolor = "CCCCCC"
-                        if value == "Druid":
-                            bgcolor = "FF7C0A"
-                        elif value == "Hunter":
-                            bgcolor = "AAD372"
-                        elif value == "Mage":
-                            bgcolor = "3FC7EB"
-                        elif value == "Paladin":
-                            bgcolor = "F48CBA"
-                        elif value == "Priest":
-                            bgcolor = "FFFFFF"
-                        elif value == "Rogue":
-                            bgcolor = "FFF468"
-                        elif value == "Shaman":
-                            bgcolor = "0070DD"
-                        elif value == "Warlock":
-                            bgcolor = "8788EE"
-                        elif value == "Warrior":
-                            bgcolor = "C69B6D"
+                        bgcolor = CLASS_LIST.get(value, {}).get("color", "CCCCCC")
                         cell.fill = PatternFill(start_color=bgcolor, end_color=bgcolor, fill_type="solid")
                     elif column_name == "Race":
                         bgcolor = "CCCCCC"
@@ -3273,6 +3270,14 @@ def createExcel(guild_id, excelType):
             "Temple of Ahn'Qiraj": "4F6228",
             "Naxxramas": "403151"
             }
+        
+        # Create role to classes mapping
+        roleToClasses = {}
+        for class_name, class_info in CLASS_LIST.items():
+            for role in class_info["roles"]:
+                if role not in roleToClasses:
+                    roleToClasses[role] = []
+                roleToClasses[role].append(class_name)
 
         i = 1
         for raid in raidList.keys():
@@ -3288,11 +3293,65 @@ def createExcel(guild_id, excelType):
             i += 1
             for raidItem in raidItems.values():
                 raidItemName = raidItem["itemName"]
-                raidItemClasses = raidItem["itemOffNotes"]
+                itemOffNotes = raidItem["itemOffNotes"]
                 lootRow = ["", raidItem["itemId"], raidItemName, raidItem["itemNotes"] ,raidItem["itemTier"], "","",""]
                 for player in players.values():
-                    if player["class"] is None or player["class"] not in raidItemClasses:
+                    # Parse itemOffNotes to extract classes and roles
+                    raidItemClasses = []
+                    raidItemRoles = []
+
+                    # Extract classes from < >
+                    class_matches = re.findall(r'<([^>]+)>', itemOffNotes)
+                    for match in class_matches:
+                        raidItemClasses.append(match.strip())
+
+                    # Extract roles from [ ]
+                    role_matches = re.findall(r'\[([^\]]+)\]', itemOffNotes)
+                    for match in role_matches:
+                        raidItemRoles.append(match.strip())
+
+                    # Get player info
+                    player_class = player.get("class")
+                    player_class_info = CLASS_LIST.get(player_class, {})
+                    player_role = player.get("role")
+
+                    # Simplified filtering logic
+                    can_use_item = False
+
+                    if raidItemClasses and not raidItemRoles:
+                        # Only classes specified - filter by class
+                        can_use_item = player_class in raidItemClasses
+
+                    elif raidItemRoles and not raidItemClasses:
+                        # Only roles specified - filter by role
+                        can_use_item = player_role in raidItemRoles
+
+                    elif raidItemClasses and raidItemRoles:
+                        # Both classes and roles specified - filter by roles + class compatibility
+                        class_match = player_class in raidItemClasses
+                        role_match = player_role in raidItemRoles
+                        class_roles = player_class_info.get("roles", [])
+
+                        isRoleToFilter = any(role in class_roles for role in raidItemRoles)
+
+                        if class_match and role_match:
+                            can_use_item = True
+
+                        elif class_match and not isRoleToFilter:
+                            can_use_item = True 
+
+                        elif not class_match:
+                            for otherClass in raidItemClasses:
+                                player_class_info = CLASS_LIST.get(otherClass, {})
+                                other_class_roles = player_class_info.get("roles", [])
+                                can_use_item = True
+                                if player_role in other_class_roles:
+                                    can_use_item = False
+                                    break
+
+                    if not can_use_item:
                         continue
+
                     playerName = player["name"].capitalize()
                     found = False
                     try:
@@ -3399,25 +3458,7 @@ def createExcel(guild_id, excelType):
 
                     playerName = cell.value.split(" (")[0].strip()
                     player = players[playerName.capitalize()]
-                    classColor = "CCCCCC"
-                    if player["class"] == "Druid":
-                        classColor = "FF7C0A"
-                    elif player["class"] == "Hunter":
-                        classColor = "AAD372"
-                    elif player["class"] == "Mage":
-                        classColor = "3FC7EB"
-                    elif player["class"] == "Paladin":
-                        classColor = "F48CBA"
-                    elif player["class"] == "Priest":
-                        classColor = "FFFFFF"
-                    elif player["class"] == "Rogue":
-                        classColor = "FFF468"
-                    elif player["class"] == "Shaman":
-                        classColor = "0070DD"
-                    elif player["class"] == "Warlock":
-                        classColor = "8788EE"
-                    elif player["class"] == "Warrior":
-                        classColor = "C69B6D"
+                    classColor = CLASS_LIST.get(player["class"], {}).get("color", "CCCCCC")
                     cell.fill = PatternFill(start_color=classColor, end_color=classColor, fill_type="solid")
 
                 index += 1
@@ -3444,26 +3485,8 @@ def createExcel(guild_id, excelType):
 
             classColor = "DDDDDD"
             classBgColor = "DDDDDD"
+            classBgColor = CLASS_LIST.get(wowClass, {}).get("color", "DDDDDD")
             fontColor = "000000"
-            if wowClass == "Druid":
-                classBgColor = "FF7C0A"
-            elif wowClass == "Hunter":
-                classBgColor = "AAD372"
-            elif wowClass == "Mage":
-                classBgColor = "3FC7EB"
-            elif wowClass == "Paladin":
-                classBgColor = "F48CBA"
-            elif wowClass == "Priest":
-                classBgColor = "FFFFFF"
-            elif wowClass == "Rogue":
-                classBgColor = "FFF468"
-            elif wowClass == "Shaman":
-                classBgColor = "0070DD"
-            elif wowClass == "Warlock":
-                classBgColor = "8788EE"
-            elif wowClass == "Warrior":
-                classBgColor = "C69B6D"
-
 
             hasValues = False
             classSheet = workbook.create_sheet(title=wowClass)
@@ -3485,8 +3508,58 @@ def createExcel(guild_id, excelType):
                     # Data
             classItems = []
             for itemId, item in itemList.items():
-            # Use 'item["itemOffNotes"]' instead of 'offNotes' and use 'in' for substring check
-                if wowClass in item.get("itemOffNotes", ""):
+            
+                itemOffNotes = item.get("itemOffNotes", "")
+                # Parse itemOffNotes to extract classes and roles
+                raidItemClasses = []
+                raidItemRoles = []
+
+                # Extract classes from < >
+                class_matches = re.findall(r'<([^>]+)>', itemOffNotes)
+                for match in class_matches:
+                    raidItemClasses.append(match.strip())
+
+                # Extract roles from [ ]
+                role_matches = re.findall(r'\[([^\]]+)\]', itemOffNotes)
+                for match in role_matches:
+                    raidItemRoles.append(match.strip())
+                
+                wow_class_info = CLASS_LIST.get(wowClass, {})
+
+                # Simplified filtering logic
+                can_use_item = False
+
+                if raidItemClasses and not raidItemRoles:
+                    # Only classes specified - filter by class
+                    can_use_item = wowClass in raidItemClasses
+
+                elif raidItemRoles and not raidItemClasses:
+                    # Only roles specified - filter by role
+                    can_use_item = any(role in raidItemRoles for role in wow_class_info.get("roles", []))
+
+                elif raidItemClasses and raidItemRoles:
+                    # Both classes and roles specified - filter by roles + class compatibility
+                    class_match = wowClass in raidItemClasses
+                    wow_class_roles = wow_class_info.get("roles", [])
+                    role_match = any(role in wow_class_roles for role in raidItemRoles)
+
+                    if class_match:
+                        can_use_item = True
+                    else:
+                        foundRoles = wow_class_roles
+                        can_use_item = True
+                        for otherClass in raidItemClasses:
+                            other_class_info = CLASS_LIST.get(otherClass, {})
+                            other_class_roles = other_class_info.get("roles", [])
+                            for role in wow_class_roles:
+                                if role in other_class_roles:
+                                    foundRoles.remove(role)
+
+                            if not foundRoles:
+                                can_use_item = False
+                                break
+
+                if can_use_item:
                     if hasValues == False:
                         hasValues = True
                     classItems.append(item)
@@ -3624,7 +3697,105 @@ def createExcel(guild_id, excelType):
                             row[col_num].value = "LC " + loot["receivedDate"]
                             row[col_num].fill = PatternFill(start_color="75F94D", end_color="75F94D", fill_type="solid")
                             break
+                    
+                    # Find the current item's details
+                    current_item = next((item for item in classItems if item["itemId"] == item_id), None)
+                    if current_item:
+                        playerRole = playerInfo.get("role", "")
+                        itemOffNotes = current_item.get("itemOffNotes", "")
+                        
+                        # Parse itemOffNotes to extract classes and roles
+                        raidItemClasses = []
+                        raidItemRoles = []
+
+                        # Extract classes from < >
+                        class_matches = re.findall(r'<([^>]+)>', itemOffNotes)
+                        for match in class_matches:
+                            raidItemClasses.append(match.strip())
+
+                        # Extract roles from [ ]
+                        role_matches = re.findall(r'\[([^\]]+)\]', itemOffNotes)
+                        for match in role_matches:
+                            raidItemRoles.append(match.strip())
+                        
+                        wow_class_info = CLASS_LIST.get(wowClass, {})
+
+                        # Simplified filtering logic
+                        can_use_item = False
+
+                        if raidItemClasses and not raidItemRoles:
+                            # Only classes specified - filter by class
+                            can_use_item = wowClass in raidItemClasses
+
+                        elif raidItemRoles and not raidItemClasses:
+                            # Only roles specified - filter by role
+                            can_use_item = playerRole in raidItemRoles
+
+                        elif raidItemClasses and raidItemRoles:
+                            # Both classes and roles specified - filter by roles + class compatibility
+                            class_match = wowClass in raidItemClasses
+                            wow_class_roles = wow_class_info.get("roles", [])
+                            role_match = playerRole in raidItemRoles
+
+                            if class_match and role_match:
+                                can_use_item = True
+                            elif class_match:
+                                # Only class match - check if no raid item roles are shared with current class
+                                wow_class_roles = wow_class_info.get("roles", [])
+                                shared_roles = any(role in wow_class_roles for role in raidItemRoles)
+                                can_use_item = not shared_roles
+                            elif role_match:
+                                # Only role match - check if no raid item classes share the role with player
+                                shared_class_role = False
+                                for raid_class in raidItemClasses:
+                                    raid_class_info = CLASS_LIST.get(raid_class, {})
+                                    raid_class_roles = raid_class_info.get("roles", [])
+                                    if player_role in raid_class_roles:
+                                        shared_class_role = True
+                                    break
+                                # Check if this player's role makes the item OS
+                                can_use_item = not shared_class_role                        
+                            
+                        if not can_use_item:
+                            row[col_num].value = "OS"
+                            row[col_num].fill = PatternFill(start_color="9DC0FA", end_color="9DC0FA", fill_type="solid")
+
+            # Remove rows where all players only have "OS" values
+            rows_to_remove = []
+            
+            for row_idx in range(2, classSheet.max_row + 1):  # Start from row 2 (after header)
+                # Check if this row has an item (has an item ID)
+                item_id_cell = classSheet.cell(row=row_idx, column=2)
+                if item_id_cell.value is None or item_id_cell.value == "":
+                    continue  # Skip non-item rows
                 
+                # Check all player columns for this item
+                all_os_or_empty = True
+                has_any_value = False
+                
+                for col_num in range(6, len(sheetPlayer) + 6):  # Player columns start at column 6
+                    cell_value = classSheet.cell(row=row_idx, column=col_num).value
+                    
+                    if cell_value and cell_value != "-":
+                        has_any_value = True
+                        if cell_value != "OS":
+                            all_os_or_empty = False
+                            break
+                
+                # If the row has values and they're all "OS", mark it for removal
+                if has_any_value and all_os_or_empty:
+                    rows_to_remove.append(row_idx)
+                    item_name = classSheet.cell(row=row_idx, column=3).value
+                    print(f"Removing item '{item_name}' from {wowClass} - all players have OS only")
+
+            # Remove rows in reverse order to avoid index shifting issues
+            for row_idx in reversed(rows_to_remove):
+                classSheet.delete_rows(row_idx, 1)
+
+            if rows_to_remove:
+                print(f"Removed {len(rows_to_remove)} OS-only items from {wowClass} sheet")
+                # Update totalRows after removing rows
+                totalRows = totalRows - len(rows_to_remove)
 
             for col_num in range(1, len(sheetPlayer) + 7):
                 finalCell = classSheet.cell(row=totalRows, column=col_num)
