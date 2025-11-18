@@ -71,6 +71,7 @@ APPLICATION_QUESTIONS = [
     "Please tell us a bit about yourself, who are you outside of the game?",
     "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
     "We require a few things from every raider in the guild. To have above average performance for your class and atleast 80% raid attendance. Can you fulfill these requirements?",
+    "With TBC just around the corner, which class/spec are you planning to play? Are you planning to play any alts?",
     "Why did you choose to apply to <Hopium>?",
     "Can someone in <Hopium> vouch for you?",
     "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
