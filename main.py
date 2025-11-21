@@ -898,29 +898,29 @@ async def handle_application_response(message):
         await message.channel.send(embed=embed)
         return
     
-    # Special validation for character name (first question)
-    if app_data['question_index'] == 0:
-        character_name = message.content.strip()
-        
-        # Validate character name
-        guild = bot.get_guild(app_data['guild_id'])
-        is_valid, error_message = await validate_character_name(character_name, guild)
-        
-        if not is_valid:
-            # Send error message and ask for character name again
-            error_embed = discord.Embed(
-                title="❌ Character Validation Failed",
-                description=error_message,
-                color=0xff0000
-            )
-            error_embed.add_field(
-                name=f"Question 1/{len(APPLICATION_QUESTIONS)}",
-                value=APPLICATION_QUESTIONS[0],
-                inline=False
-            )
-            error_embed.set_footer(text="Please provide the correct character name or type 'cancel' to cancel the application.")
-            await message.channel.send(embed=error_embed)
-            return  # Don't advance to next question, ask again
+    # Special validation for character name (first question) - COMMENTED OUT
+    # if app_data['question_index'] == 0:
+    #     character_name = message.content.strip()
+    #     
+    #     # Validate character name
+    #     guild = bot.get_guild(app_data['guild_id'])
+    #     is_valid, error_message = await validate_character_name(character_name, guild)
+    #     
+    #     if not is_valid:
+    #         # Send error message and ask for character name again
+    #         error_embed = discord.Embed(
+    #             title="❌ Character Validation Failed",
+    #             description=error_message,
+    #             color=0xff0000
+    #         )
+    #         error_embed.add_field(
+    #             name=f"Question 1/{len(APPLICATION_QUESTIONS)}",
+    #             value=APPLICATION_QUESTIONS[0],
+    #             inline=False
+    #         )
+    #         error_embed.set_footer(text="Please provide the correct character name or type 'cancel' to cancel the application.")
+    #         await message.channel.send(embed=error_embed)
+    #         return  # Don't advance to next question, ask again
     
     # Save the answer
     app_data['answers'].append(message.content)
