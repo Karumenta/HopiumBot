@@ -64,18 +64,62 @@ intents.guilds = True  # Enable guild intents
 intents.members = True  # Enable member intents
 
 # Application questions
-APPLICATION_QUESTIONS = [
-    "Character name:",
-    "Class/Spec:",
-    "What country are you from and how old are you?",
-    "Please tell us a bit about yourself, who are you outside of the game?",
-    "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
-    "We require a few things from every raider in the guild. To have above average performance for your class and atleast 80% raid attendance. Can you fulfill these requirements?",
-    "With TBC just around the corner, which class/spec are you planning to play? Are you planning to play any alts?",
-    "Why did you choose to apply to <Hopium>?",
-    "Can someone in <Hopium> vouch for you?",
-    "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
-]
+# Branching Application System
+APPLICATION_CONFIG = {
+    "intro": {
+        "question": "Welcome to <Hopium>! As we have two raiding groups, please indicate which one you are interested in:",
+        "options": [
+            {"id": "speed_run", "label": "⚡ Speed Run", "description": "Monday 20:00-00:00 ST - 2 Characters required"},
+            {"id": "chill", "label": "😎 Chill", "description": "Thursday 20:00-00:00 ST - 1 Character required"},
+            {"id": "both", "label": "🎯 Both", "description": "Both raiding days - 3 Characters required"},
+            {"id": "none", "label": "❌ None", "description": "I'm not interested"}
+        ]
+    },
+    "paths": {
+        "speed_run": [
+            "[Speedrun] Main character name:",
+            "[Speedrun] Main Class/Spec:",
+            "[Speedrun] Alt character name:",
+            "[Speedrun] Alt Class/Spec:",
+            "What country are you from and how old are you?",
+            "Please tell us a bit about yourself, who are you outside of the game?",
+            "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
+            "We require a few things from every raider in the guild. To have above average performance for your class and atleast 80% raid attendance. Can you fulfill these requirements?",
+            "Why did you choose to apply to <Hopium>?",
+            "Can someone in <Hopium> vouch for you?",
+            "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
+        ],
+        "chill": [
+            "[Chill run] Character name:",
+            "[Chill run] Class/Spec:",
+            "What country are you from and how old are you?",
+            "Please tell us a bit about yourself, who are you outside of the game?",
+            "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
+            "We require a few things from every raider in the guild. To have above average performance for your class and atleast 80% raid attendance. Can you fulfill these requirements?",
+            "Why did you choose to apply to <Hopium>?",
+            "Can someone in <Hopium> vouch for you?",
+            "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
+        ],
+        "both": [
+            "[Speedrun] Main character name:",
+            "[Speedrun] Main Class/Spec:",
+            "[Speedrun] Alt character name:",
+            "[Speedrun] Alt Class/Spec:",
+            "[Chill run] Character name:",
+            "[Chill run] Class/Spec:",
+            "What country are you from and how old are you?",
+            "Please tell us a bit about yourself, who are you outside of the game?",
+            "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
+            "We require a few things from every raider in the guild. To have above average performance for your class and atleast 80% raid attendance. Can you fulfill these requirements?",
+            "Why did you choose to apply to <Hopium>?",
+            "Can someone in <Hopium> vouch for you?",
+            "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
+        ]
+    }
+}
+
+# Legacy support - will be removed after migration
+APPLICATION_QUESTIONS = APPLICATION_CONFIG["paths"]["both"]
 
 CLASS_LIST = {
     "Druid" : {"name": "Druid", "roles": ["DPS", "Heal", "Tank"], "color": "FF7C0A"},
@@ -706,26 +750,33 @@ class ApplicationView(discord.ui.View):
         try:
             # Initialize application data
             active_applications[user.id] = {
-                'question_index': 0,
+                'question_index': -1,  # Start at -1 to indicate path selection phase
                 'answers': [],
                 'guild_id': interaction.guild.id,
-                'start_time': asyncio.get_event_loop().time()  # Track when application started
+                'start_time': asyncio.get_event_loop().time(),
+                'path': None,
+                'questions': None
             }
             
-            # Send first question
+            # Send path selection
             embed = discord.Embed(
-                title="🎉 Application Started!",
-                description=f"Thank you for your interest in applying! I'll ask you some questions.",
+                title="🎉 Welcome to <Hopium>!",
+                description=APPLICATION_CONFIG["intro"]["question"],
                 color=0x00ff00
             )
-            embed.add_field(
-                name=f"Question 1/{len(APPLICATION_QUESTIONS)}",
-                value=APPLICATION_QUESTIONS[0],
-                inline=False
-            )
-            embed.set_footer(text="Please respond with your answer. Type 'cancel' to cancel the application.")
             
-            await user.send(embed=embed)
+            # Add option descriptions
+            for option in APPLICATION_CONFIG["intro"]["options"]:
+                embed.add_field(
+                    name=option["label"],
+                    value=option["description"],
+                    inline=False
+                )
+            
+            embed.set_footer(text="Please click one of the buttons below to select your application path.")
+            
+            view = ApplicationPathView(user.id, interaction.guild.id)
+            await user.send(embed=embed, view=view)
             
             # Respond to the interaction
             await interaction.response.send_message("✅ Check your DMs! I've started your application process.", ephemeral=True)
@@ -736,6 +787,72 @@ class ApplicationView(discord.ui.View):
         except Exception as e:
             await interaction.response.send_message("❌ An error occurred. Please try again later or reach someone from the Staff.", ephemeral=True)
             print(f"Error sending DM: {e}")
+
+class ApplicationPathView(discord.ui.View):
+    def __init__(self, user_id, guild_id):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.user_id = user_id
+        self.guild_id = guild_id
+        
+        # Add buttons for each path option
+        for option in APPLICATION_CONFIG["intro"]["options"]:
+            button = discord.ui.Button(
+                label=option["label"],
+                style=discord.ButtonStyle.primary,
+                custom_id=f"path_{option['id']}"
+            )
+            button.callback = self.create_callback(option['id'])
+            self.add_item(button)
+    
+    def create_callback(self, path_id):
+        async def callback(interaction):
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message("❌ This is not your application.", ephemeral=True)
+                return
+            
+            # Handle 'none' option - end application
+            if path_id == 'none':
+                if self.user_id in active_applications:
+                    del active_applications[self.user_id]
+                
+                embed = discord.Embed(
+                    title="❌ Application Cancelled",
+                    description="Your application has been cancelled. You can start a new one anytime by clicking the Apply button again.",
+                    color=0xff0000
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+                return
+            
+            # Update application data with chosen path
+            if self.user_id in active_applications:
+                active_applications[self.user_id]['path'] = path_id
+                active_applications[self.user_id]['questions'] = APPLICATION_CONFIG["paths"][path_id]
+                active_applications[self.user_id]['question_index'] = 0
+                
+                # Send first question of chosen path
+                questions = APPLICATION_CONFIG["paths"][path_id]
+                embed = discord.Embed(
+                    title="📝 Let's Begin!",
+                    description=f"You've chosen the **{next(opt['label'] for opt in APPLICATION_CONFIG['intro']['options'] if opt['id'] == path_id)}** path.",
+                    color=0x00ff00
+                )
+                embed.add_field(
+                    name=f"Question 1/{len(questions)}",
+                    value=questions[0],
+                    inline=False
+                )
+                embed.set_footer(text="Please respond with your answer. Type 'cancel' to cancel the application.")
+                
+                await interaction.response.edit_message(embed=embed, view=None)
+            else:
+                await interaction.response.send_message("❌ Application session expired. Please start a new application.", ephemeral=True)
+        
+        return callback
+    
+    async def on_timeout(self):
+        # Clean up expired application
+        if self.user_id in active_applications:
+            del active_applications[self.user_id]
 
 class ReviewView(discord.ui.View):
     def __init__(self, user_id, character_name, application_channel, review_channel):
@@ -898,6 +1015,20 @@ async def handle_application_response(message):
         await message.channel.send(embed=embed)
         return
     
+    # Check if user is still in path selection phase
+    if app_data['question_index'] == -1:
+        await message.channel.send("🤔 Please use the buttons above to select your application path.")
+        return
+    
+    # Check if path is selected
+    if not app_data.get('path') or not app_data.get('questions'):
+        await message.channel.send("❌ Something went wrong with your application. Please start over.")
+        del active_applications[user_id]
+        return
+    
+    # Get the current questions for this path
+    questions = app_data['questions']
+    
     # Special validation for character name (first question) - COMMENTED OUT
     # if app_data['question_index'] == 0:
     #     character_name = message.content.strip()
@@ -914,28 +1045,28 @@ async def handle_application_response(message):
     #             color=0xff0000
     #         )
     #         error_embed.add_field(
-    #             name=f"Question 1/{len(APPLICATION_QUESTIONS)}",
-    #             value=APPLICATION_QUESTIONS[0],
+    #             name=f"Question 1/{len(questions)}",
+    #             value=questions[0],
     #             inline=False
     #         )
     #         error_embed.set_footer(text="Please provide the correct character name or type 'cancel' to cancel the application.")
     #         await message.channel.send(embed=error_embed)
     #         return  # Don't advance to next question, ask again
-    
+
     # Save the answer
     app_data['answers'].append(message.content)
     app_data['question_index'] += 1
     
     # Check if we have more questions
-    if app_data['question_index'] < len(APPLICATION_QUESTIONS):
+    if app_data['question_index'] < len(questions):
         # Send next question
         embed = discord.Embed(
             title="📝 Next Question",
             color=0x00ff00
         )
         embed.add_field(
-            name=f"Question {app_data['question_index'] + 1}/{len(APPLICATION_QUESTIONS)}",
-            value=APPLICATION_QUESTIONS[app_data['question_index']],
+            name=f"Question {app_data['question_index'] + 1}/{len(questions)}",
+            value=questions[app_data['question_index']],
             inline=False
         )
         embed.set_footer(text="Please respond with your answer. Type 'cancel' to cancel the application.")
@@ -944,6 +1075,98 @@ async def handle_application_response(message):
     else:
         # Application completed
         await complete_application(message.author, app_data)
+
+async def send_character_reviews(review_channel, app_data):
+    """Send character detail reviews for all character names mentioned in the application"""
+    if not review_channel or not app_data:
+        return
+    
+    # Get the questions and answers
+    questions = app_data.get('questions', [])
+    answers = app_data.get('answers', [])
+    
+    if len(questions) != len(answers):
+        return
+    
+    # Find all character name questions and their corresponding answers
+    character_data = []
+    
+    for i, (question, answer) in enumerate(zip(questions, answers)):
+        question_lower = question.lower()
+        if 'character name' in question_lower:
+            # Extract the type of character from the question
+            character_type = "Character"
+            if "[speedrun]" in question.lower():
+                if "main" in question.lower():
+                    character_type = "⚡ Speedrun Main"
+                else:
+                    character_type = "⚡ Speedrun Alt"
+            elif "[chill run]" in question.lower():
+                character_type = "😎 Chill Run"
+            
+            character_data.append({
+                'name': answer.strip(),
+                'type': character_type,
+                'question_index': i + 1
+            })
+    
+    if not character_data:
+        # Fallback: use first answer as character name if no specific character questions found
+        if answers:
+            character_data.append({
+                'name': answers[0].strip(),
+                'type': "Character",
+                'question_index': 1
+            })
+    
+    # Send character reviews
+    for char_data in character_data:
+        character_name = char_data['name']
+        character_type = char_data['type']
+        
+        if not character_name or character_name.lower() in ['', 'unknown', 'n/a', 'none']:
+            continue
+        
+        # Create character review embed
+        embed = discord.Embed(
+            title=f"🔍 Character Review - {character_name}",
+            description=f"**Type:** {character_type}",
+            color=0x0099ff
+        )
+        
+        # Add lookup links
+        embed.add_field(
+            name="🔗 Warcraft Logs",
+            value=f"[View WCL Profile](https://fresh.warcraftlogs.com/character/eu/spineshatter/{character_name.replace(' ', '%20')})",
+            inline=True
+        )
+        embed.add_field(
+            name="⚔️ Classic WoW Armory",
+            value=f"[View Armory Profile](https://classicwowarmory.com/character/eu/spineshatter/{character_name.replace(' ', '%20')})",
+            inline=True
+        )
+        
+        # Check if character exists and add validation info
+        character_exists, error_msg = await validate_character_exists(character_name)
+        if not character_exists and error_msg:
+            embed.add_field(
+                name="⚠️ Validation Status",
+                value=f"Character validation: {error_msg}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="✅ Validation Status",
+                value="Character found on armory",
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Question {char_data['question_index']}: {questions[char_data['question_index']-1] if char_data['question_index']-1 < len(questions) else 'Unknown'}")
+        
+        await review_channel.send(embed=embed)
+        
+        # Small delay between character reviews to avoid rate limits
+        await asyncio.sleep(0.5)
 
 async def complete_application(user, app_data):
     # Remove from active applications
@@ -1058,14 +1281,22 @@ async def complete_application(user, app_data):
             color=0x0099ff
         )
         
-        for i, (question, answer) in enumerate(zip(APPLICATION_QUESTIONS, app_data['answers'])):
+        # Get the questions from the chosen path
+        questions = app_data.get('questions', APPLICATION_QUESTIONS)  # Fallback to legacy questions
+        path_name = app_data.get('path', 'unknown')
+        
+        # Add path information
+        if path_name != 'unknown':
+            path_label = next((opt['label'] for opt in APPLICATION_CONFIG['intro']['options'] if opt['id'] == path_name), path_name)
+            embed.description = f"Application submitted by {user.mention}\n**Application for {path_label}**"
+        
+        for i, (question, answer) in enumerate(zip(questions, app_data['answers'])):
             embed.add_field(
                 name=f"Q{i+1}: {question}",
                 value=answer[:1024] if len(answer) <= 1024 else answer[:1021] + "...",
                 inline=False
             )
         
-        embed.set_footer(text=f"User ID: {user.id}")
         await application_channel.send(embed=embed)
         
         # Send nick change notification if nickname was different
@@ -1098,32 +1329,8 @@ async def complete_application(user, app_data):
         view = ReviewView(user.id, character_name, application_channel, review_channel)
         await review_channel.send(embed=embed, view=view)
         
-        # Send character lookup links
-        links_embed = discord.Embed(
-            title="🔗 Character Lookup Links",
-            color=0x0099ff
-        )
-        links_embed.add_field(
-            name="Warcraft Logs",
-            value=f"[View WCL Profile](https://fresh.warcraftlogs.com/character/eu/spineshatter/{character_name.replace(' ', '%20')})",
-            inline=False
-        )
-        links_embed.add_field(
-            name="Classic WoW Armory",
-            value=f"[View Armory Profile](https://classicwowarmory.com/character/eu/spineshatter/{character_name.replace(' ', '%20')})",
-            inline=False
-        )
-        
-        # Check if character exists and add a note if not found
-        character_exists, error_msg = await validate_character_exists(character_name)
-        if not character_exists and error_msg:
-            links_embed.add_field(
-                name="⚠️ Note",
-                value=f"Character validation: {error_msg}",
-                inline=False
-            )
-        
-        await review_channel.send(embed=links_embed)
+        # Send character detail reviews for all characters mentioned in the application
+        await send_character_reviews(review_channel, app_data)
 
 @bot.event
 @bot.event
