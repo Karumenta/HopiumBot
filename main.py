@@ -52,6 +52,11 @@ logging.basicConfig(
 # Store ongoing applications
 active_applications = {}
 
+# Application timeout settings (in seconds)
+PATH_SELECTION_TIMEOUT = 1200  # 20 minutes for path selection
+QUESTION_WARNING_TIME = 600   # 10 minutes - send warning
+QUESTION_TIMEOUT = 900         # 15 minutes - cancel application
+
 # Set discord.py logging level to reduce spam
 logging.getLogger('discord').setLevel(logging.WARNING)
 logging.getLogger('discord.http').setLevel(logging.WARNING)
@@ -265,41 +270,148 @@ def initialize_guild_data_files(guild_id):
         print(f"❌ Error initializing data files for guild {guild_id}: {e}")
         logger.error(f"Error initializing data files for guild {guild_id}: {e}", exc_info=True)
 
+# Application cleanup functions
+async def check_application_timeouts():
+    """Check for applications that need warnings or cleanup due to inactivity"""
+    current_time = asyncio.get_event_loop().time()
+    warnings_sent = []
+    cancelled_apps = []
+    
+    print(f"🔍 Checking {len(active_applications)} active applications for timeouts")
+    
+    for user_id, app_data in list(active_applications.items()):
+        # Skip if user is still in path selection phase (handled by Discord UI timeout)
+        if app_data.get('question_index', -1) < 0:
+            print(f"  Skipping user {user_id}: still in path selection phase")
+            continue
+            
+        last_activity = app_data.get('last_activity', app_data.get('start_time', current_time))
+        inactive_time = current_time - last_activity
+        question_index = app_data.get('question_index', 0)
+        warning_sent = app_data.get('warning_sent', False)
+        
+        print(f"  User {user_id}: inactive for {inactive_time:.1f}s, question {question_index}, warning_sent: {warning_sent}")
+        
+        # Check if user needs a warning (10 minutes of inactivity)
+        if inactive_time >= QUESTION_WARNING_TIME and not warning_sent:
+            print(f"  🚨 Sending warning to user {user_id}")
+            try:
+                user = bot.get_user(user_id)
+                if user:
+                    questions = app_data.get('questions', [])
+                    current_q = app_data.get('question_index', 0)
+                    
+                    embed = discord.Embed(
+                        title="⚠️ Inactivity Detected",
+                        description="You have **5 minutes** to answer the current question or your application will be automatically cancelled.",
+                        color=0xff6b00
+                    )
+                    
+                    if current_q < len(questions):
+                        embed.add_field(
+                            name=f"Current Question ({current_q + 1}/{len(questions)})",
+                            value=questions[current_q],
+                            inline=False
+                        )
+                    
+                    await user.send(embed=embed)
+                    app_data['warning_sent'] = True
+                    warnings_sent.append(user_id)
+                    
+            except Exception as e:
+                logger.warning(f"Could not send warning to user {user_id}: {e}")
+        
+        # Check if application should be cancelled (15 minutes total inactivity)
+        elif inactive_time >= QUESTION_TIMEOUT:
+            print(f"  ❌ Cancelling application for user {user_id}")
+            try:
+                user = bot.get_user(user_id)
+                if user:
+                    embed = discord.Embed(
+                        title="❌ Application Cancelled",
+                        description="Your application has been cancelled due to inactivity (no response for 15 minutes).",
+                        color=0xff0000
+                    )
+                    embed.add_field(
+                        name="Want to reapply?",
+                        value="You can start a new application anytime by clicking the Apply button again in the server.",
+                        inline=False
+                    )
+                    await user.send(embed=embed)
+                    
+                cancelled_apps.append(user_id)
+                del active_applications[user_id]
+                
+            except Exception as e:
+                logger.warning(f"Could not notify user {user_id} about cancellation: {e}")
+                cancelled_apps.append(user_id)
+                if user_id in active_applications:
+                    del active_applications[user_id]
+    
+    if warnings_sent:
+        print(f"📤 Sent inactivity warnings to {len(warnings_sent)} users")
+        logger.info(f"Sent inactivity warnings to {len(warnings_sent)} users")
+    if cancelled_apps:
+        print(f"🧹 Cleaned up {len(cancelled_apps)} inactive applications")
+        logger.info(f"Cancelled {len(cancelled_apps)} inactive applications")
+    if not warnings_sent and not cancelled_apps:
+        print("✅ No timeout actions needed")
+
+# Separate task for frequent timeout checking
+@tasks.loop(seconds=30)  # Check every 30 seconds for timeouts
+async def timeout_checker_task():
+    try:
+        if active_applications:  # Only run if there are active applications
+            await check_application_timeouts()
+    except Exception as e:
+        print(f"❌ Error in timeout checker: {e}")
+        logger.error(f"Error in timeout checker: {e}", exc_info=True)
+
+@timeout_checker_task.before_loop
+async def before_timeout_checker():
+    await bot.wait_until_ready()
+    print("⏰ Timeout checker started - will run every 30 seconds")
+    logger.info("Timeout checker started - will run every 30 seconds")
+
 # Background task that runs every X minutes
-@tasks.loop(minutes=15)  # Reduced frequency - 15 minutes is more suitable for API calls
+@tasks.loop(minutes=5)  # Run every 5 minutes to properly handle application timeouts
 async def periodic_task():
     try:
         current_time = datetime.now().strftime('%H:%M:%S')
         print(f"🔄 Starting periodic update for all guilds at {current_time}")
         logger.info(f"Starting periodic update for all guilds at {current_time}")
         
+        # Only run the full data update every cycle (no timeout checking here - handled by separate task)
+        print(f"📊 Running full data update cycle")
+        logger.info(f"Running full data update cycle")
+        
         # Process each guild the bot is in
         for guild in bot.guilds:
-            try:
-                print(f"🏰 Processing guild: {guild.name} (ID: {guild.id})")
-                logger.info(f"Processing guild: {guild.name} (ID: {guild.id})")
-                
-                # Initialize guild data files if needed
-                initialize_guild_data_files(guild.id)
-                
-                # Get guild-specific file paths
-                paths = get_guild_file_paths(guild.id)
-                
-                # Check if required files exist for this guild
-                if not os.path.exists(paths['character_file']):
-                    print(f"⚠️ Character file not found for guild {guild.name}: {paths['character_file']}")
+                try:
+                    print(f"🏰 Processing guild: {guild.name} (ID: {guild.id})")
+                    logger.info(f"Processing guild: {guild.name} (ID: {guild.id})")
+                    
+                    # Initialize guild data files if needed
+                    initialize_guild_data_files(guild.id)
+                    
+                    # Get guild-specific file paths
+                    paths = get_guild_file_paths(guild.id)
+                    
+                    # Check if required files exist for this guild
+                    if not os.path.exists(paths['character_file']):
+                        print(f"⚠️ Character file not found for guild {guild.name}: {paths['character_file']}")
+                        continue
+                    
+                    # Process this guild's data
+                    await process_guild_data(guild.id, paths)
+                    
+                except Exception as e:
+                    print(f"❌ Error processing guild {guild.name}: {e}")
+                    logger.error(f"Error processing guild {guild.name}: {e}", exc_info=True)
                     continue
-                
-                # Process this guild's data
-                await process_guild_data(guild.id, paths)
-                
-            except Exception as e:
-                print(f"❌ Error processing guild {guild.name}: {e}")
-                logger.error(f"Error processing guild {guild.name}: {e}", exc_info=True)
-                continue
         
-        print(f"✅ Periodic update completed for all guilds")
-        logger.info(f"Periodic update completed for all guilds")
+        print(f"✅ Periodic data update completed for all guilds")
+        logger.info(f"Periodic data update completed for all guilds")
         
     except Exception as e:
         print(f"❌ Critical error in periodic task: {e}")
@@ -635,8 +747,8 @@ async def process_guild_data(guild_id, paths):
 @periodic_task.before_loop
 async def before_periodic_task():
     await bot.wait_until_ready()
-    print("🚀 Periodic task started - will run every 5 minutes")
-    logger.info("Periodic task started - will run every 5 minutes")
+    print("🚀 Data update task started - will run every 5 minutes")
+    logger.info("Data update task started - will run every 5 minutes")
 
 async def validate_character_exists(character_name):
     try:
@@ -749,13 +861,16 @@ class ApplicationView(discord.ui.View):
         
         try:
             # Initialize application data
+            current_time = asyncio.get_event_loop().time()
             active_applications[user.id] = {
                 'question_index': -1,  # Start at -1 to indicate path selection phase
                 'answers': [],
                 'guild_id': interaction.guild.id,
-                'start_time': asyncio.get_event_loop().time(),
+                'start_time': current_time,
+                'last_activity': current_time,
                 'path': None,
-                'questions': None
+                'questions': None,
+                'warning_sent': False
             }
             
             # Send path selection
@@ -773,7 +888,7 @@ class ApplicationView(discord.ui.View):
                     inline=False
                 )
             
-            embed.set_footer(text="Please click one of the buttons below to select your application path.")
+            embed.set_footer(text="Please click one of the buttons below to select your application type.")
             
             view = ApplicationPathView(user.id, interaction.guild.id)
             await user.send(embed=embed, view=view)
@@ -790,7 +905,7 @@ class ApplicationView(discord.ui.View):
 
 class ApplicationPathView(discord.ui.View):
     def __init__(self, user_id, guild_id):
-        super().__init__(timeout=300)  # 5 minute timeout
+        super().__init__(timeout=PATH_SELECTION_TIMEOUT)  # 20 minute timeout
         self.user_id = user_id
         self.guild_id = guild_id
         
@@ -817,23 +932,25 @@ class ApplicationPathView(discord.ui.View):
                 
                 embed = discord.Embed(
                     title="❌ Application Cancelled",
-                    description="Your application has been cancelled. You can start a new one anytime by clicking the Apply button again.",
-                    color=0xff0000
+                    description="Your application has been cancelled. Feel free to apply again in the future if your raiding interests change.",
+                    color=0x888888
                 )
                 await interaction.response.edit_message(embed=embed, view=None)
                 return
             
             # Update application data with chosen path
             if self.user_id in active_applications:
+                current_time = asyncio.get_event_loop().time()
                 active_applications[self.user_id]['path'] = path_id
                 active_applications[self.user_id]['questions'] = APPLICATION_CONFIG["paths"][path_id]
                 active_applications[self.user_id]['question_index'] = 0
+                active_applications[self.user_id]['last_activity'] = current_time
                 
                 # Send first question of chosen path
                 questions = APPLICATION_CONFIG["paths"][path_id]
                 embed = discord.Embed(
                     title="📝 Let's Begin!",
-                    description=f"You've chosen the **{next(opt['label'] for opt in APPLICATION_CONFIG['intro']['options'] if opt['id'] == path_id)}** path.",
+                    description=f"You've chosen the **{next(opt['label'] for opt in APPLICATION_CONFIG['intro']['options'] if opt['id'] == path_id)}** application.",
                     color=0x00ff00
                 )
                 embed.add_field(
@@ -1017,7 +1134,7 @@ async def handle_application_response(message):
     
     # Check if user is still in path selection phase
     if app_data['question_index'] == -1:
-        await message.channel.send("🤔 Please use the buttons above to select your application path.")
+        await message.channel.send("🤔 Please use the buttons above to select your application type.")
         return
     
     # Check if path is selected
@@ -1056,6 +1173,10 @@ async def handle_application_response(message):
     # Save the answer
     app_data['answers'].append(message.content)
     app_data['question_index'] += 1
+    
+    # Update activity tracking and reset warning state
+    app_data['last_activity'] = asyncio.get_event_loop().time()
+    app_data['warning_sent'] = False  # Reset warning for next question
     
     # Check if we have more questions
     if app_data['question_index'] < len(questions):
@@ -1341,10 +1462,44 @@ async def on_ready():
     logger.info(f'Bot is in {len(bot.guilds)} guilds')
     print('------')
     
-    # Start the periodic task
+    # Start the periodic tasks
     if not periodic_task.is_running():
         periodic_task.start()
-        logger.info('Periodic task started')
+        logger.info('Periodic data update task started')
+    
+    if not timeout_checker_task.is_running():
+        timeout_checker_task.start()
+        logger.info('Timeout checker task started')
+    
+    # Auto-run setupHopium for all guilds
+    print(f"🔧 Running setupHopium for {len(bot.guilds)} guilds...")
+    for guild in bot.guilds:
+        try:
+            # Create a mock context object to pass to setupHopium
+            class MockContext:
+                def __init__(self, guild):
+                    self.guild = guild
+                    self.message = None
+                
+                async def send(self, content):
+                    # Just log instead of sending messages
+                    print(f"  {guild.name}: {content}")
+                    return self  # Return self to act as a message object
+                
+                async def delete(self):
+                    # Mock delete method
+                    pass
+            
+            mock_ctx = MockContext(guild)
+            print(f"🔧 Setting up guild: {guild.name}")
+            await setupHopium(mock_ctx)
+            await asyncio.sleep(1)  # Small delay between guilds to avoid rate limits
+        except Exception as e:
+            print(f"❌ Failed to setup guild {guild.name}: {e}")
+            logger.error(f"Failed to setup guild {guild.name}: {e}", exc_info=True)
+    
+    print("✅ setupHopium completed for all guilds!")
+    logger.info("setupHopium completed for all guilds")
 
 @bot.event
 async def on_error(event, *args, **kwargs):
