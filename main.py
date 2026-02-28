@@ -1027,7 +1027,7 @@ class ReviewView(discord.ui.View):
                 trials_category = await guild.create_category("Trials", overwrites=overwrites)
                 print("Created 'Trials' category with Officer/Guild Leader/Bot permissions!")
             
-            # Rename application channel and move both channels to Trials category
+            # Rename application channel and move to Trials category
             if self.application_channel:
                 new_channel_name = f"trial-{self.character_name.lower().replace(' ', '-')}"
                 # When moving to Trials, keep user access for the trial channel
@@ -1036,9 +1036,6 @@ class ReviewView(discord.ui.View):
                     member: discord.PermissionOverwrite(read_messages=True, send_messages=True, view_channel=True)
                 }
                 await self.application_channel.edit(name=new_channel_name, category=trials_category, overwrites=trial_overwrites)
-            if self.review_channel:
-                # Review channel inherits category permissions only
-                await self.review_channel.edit(category=trials_category)
             
             # Send acceptance message to application channel
             if self.application_channel:
@@ -1049,14 +1046,14 @@ class ReviewView(discord.ui.View):
                 )
                 accept_embed.add_field(
                     name="📋 General Information",
-                    value="Just some general info we work on a no sign up based roster, post in ⁠⛔absence if you're going to miss a raid, so i won't roster you for that week, and i try to post the roster around friday in ⁠📒raid-assigments and update the assignments with it.",
+                    value="Just some general info we work on a no sign up based roster, post in ⁠⛔absence if you're going to miss a raid, so i won't roster you for that week, and i try to post the roster around wednesday in ⁠📒raid-assigments and the assignments will be updated before the raid.",
                     inline=False
                 )
-                accept_embed.add_field(
-                    name="🎯 TMB Setup Required",
-                    value="Please create a character on https://thatsmybis.com/ and add him to the guild from the home page. Once you do it notify us, Thanks!",
-                    inline=False
-                )
+                #accept_embed.add_field(
+                #    name="🎯 TMB Setup Required",
+                #    value="Please create a character on https://thatsmybis.com/ and add him to the guild from the home page. Once you do it notify us, Thanks!",
+                #    inline=False
+                #)
                 accept_embed.add_field(
                     name="⚙️ Addons Required",
                     value="Please make sure you install RCLC lootcouncil before heading into your first raid with us, we use this addon to distribute loot in our raids 🙂",
@@ -1064,22 +1061,73 @@ class ReviewView(discord.ui.View):
                 )
                 await self.application_channel.send(embed=accept_embed)
             
-            # Send confirmation message to review channel
-            await interaction.response.send_message(f"✅ Application accepted by {interaction.user.mention}! {member.mention} has been given the Trial role and channels moved to Trials category.", ephemeral=False)
+            # Send confirmation message to interaction BEFORE deleting the review channel
+            await interaction.response.send_message(f"✅ Application accepted! {member.mention} has been given the Trial role and the trial channel has been moved to the Trials category.", ephemeral=False)
             
-            # Find and delete the first message (review message with buttons)
+            # Get or create "review-all" channel under Trials category
+            review_all_channel = discord.utils.get(guild.channels, name="review-all")
+            if not review_all_channel:
+                # Create "review-all" channel with officer/guild leader permissions under Trials category
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(read_messages=False, send_messages=False, view_channel=False),
+                }
+                
+                # Add permissions for specific roles
+                officer_role = discord.utils.get(guild.roles, name="Officer")
+                guild_leader_role = discord.utils.get(guild.roles, name="Guild Leader")
+                bot_member = guild.me  # The bot itself
+                
+                if officer_role:
+                    overwrites[officer_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_messages=True, view_channel=True)
+                if guild_leader_role:
+                    overwrites[guild_leader_role] = discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_messages=True, view_channel=True)
+                if bot_member:
+                    overwrites[bot_member] = discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_messages=True, view_channel=True)
+                
+                review_all_channel = await guild.create_text_channel("review-all", category=trials_category, overwrites=overwrites)
+                print("Created 'review-all' channel with Officer/Guild Leader/Bot permissions in Trials category!")
+            else:
+                # If review-all channel exists but is not in Trials category, move it there
+                if review_all_channel.category != trials_category:
+                    await review_all_channel.edit(category=trials_category)
+                    print("Moved existing 'review-all' channel to Trials category!")
+            
+            # Send confirmation message to review-all channel
+            if review_all_channel:
+                confirmation_embed = discord.Embed(
+                    title="✅ Application Accepted",
+                    description=f"**Staff Member:** {interaction.user.mention}\n**Applicant:** {member.mention} ({member.display_name})\n**Character Name:** {self.character_name}",
+                    color=0x00ff00
+                )
+                confirmation_embed.add_field(
+                    name="📁 Trial Channel",
+                    value=f"Trial channel: {self.application_channel.mention if self.application_channel else 'N/A'}",
+                    inline=False
+                )
+                confirmation_embed.add_field(
+                    name="⚡ Actions Taken",
+                    value="• Trial role assigned\n• Channel moved to Trials category\n• Review channel deleted",
+                    inline=False
+                )
+                await review_all_channel.send(embed=confirmation_embed)
+            
+            # Delete the review channel LAST to avoid interaction errors
             if self.review_channel:
-                async for message in self.review_channel.history(limit=50, oldest_first=True):
-                    if message.author == bot.user and message.embeds:
-                        # Check if this is the review message by looking for the title
-                        embed = message.embeds[0]
-                        if embed.title and "Review Application" in embed.title:
-                            await message.delete()
-                            break
+                try:
+                    await self.review_channel.delete()
+                    print(f"Deleted review channel: {self.review_channel.name}")
+                except Exception as delete_error:
+                    print(f"Error deleting review channel: {delete_error}")
             
         except Exception as e:
-            await interaction.response.send_message(f"❌ Error processing acceptance: {e}", ephemeral=True)
-            print(f"Error accepting application: {e}")
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(f"❌ Error processing acceptance: {e}", ephemeral=True)
+                else:
+                    await interaction.response.send_message(f"❌ Error processing acceptance: {e}", ephemeral=True)
+            except Exception:
+                # If we can't send the error message, just log it
+                print(f"Error accepting application: {e}")
     
     @discord.ui.button(label='Decline', style=discord.ButtonStyle.red, emoji='❌')
     async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3631,7 +3679,9 @@ def createExcel(guild_id, excelType):
             "Molten Core": "E26B0A",
             "Blackwing Lair": "C0504D",
             "Temple of Ahn'Qiraj": "4F6228",
-            "Naxxramas": "403151"
+            "Naxxramas": "403151",
+            "Magtheridon's Lair": "403151",
+            "Gruul's Lair": "C0504D"
             }
         
         # Create role to classes mapping
@@ -3795,17 +3845,17 @@ def createExcel(guild_id, excelType):
             row[4].font = Font(name="Aptos", bold=True)
             row[4].border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-            if row[4].value == "1":
+            if row[4].value == "1" or row[4].value == "S":
                 row[4].fill = PatternFill(start_color="32C3F6", end_color="32C3F6", fill_type="solid")
-            elif row[4].value == "2":
+            elif row[4].value == "2" or row[4].value == "A":
                 row[4].fill = PatternFill(start_color="20FF26", end_color="20FF26", fill_type="solid")
-            elif row[4].value == "3":
+            elif row[4].value == "3" or row[4].value == "B":
                 row[4].fill = PatternFill(start_color="F7FF26", end_color="F7FF26", fill_type="solid")
-            elif row[4].value == "4":
+            elif row[4].value == "4" or row[4].value == "C":
                 row[4].fill = PatternFill(start_color="FF734D", end_color="FF734D", fill_type="solid")
-            elif row[4].value == "5":
+            elif row[4].value == "5" or row[4].value == "D":
                 row[4].fill = PatternFill(start_color="F30026", end_color="F30026", fill_type="solid")
-            elif row[4].value == "6":
+            elif row[4].value == "6" or row[4].value == "F":
                 row[4].fill = PatternFill(start_color="CC3071", end_color="CC3071", fill_type="solid")
 
             foundTheEnd = False
