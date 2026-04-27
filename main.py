@@ -19,7 +19,7 @@ import zipfile
 
 from pathlib import Path
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import json
 import time
@@ -34,7 +34,7 @@ from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.comments import Comment
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 load_dotenv()
 token = os.getenv('DISCORD_TOKEN')
@@ -74,9 +74,9 @@ APPLICATION_CONFIG = {
     "intro": {
         "question": "Welcome to <Hopium>! As we have two raiding groups, please indicate which one you are interested in:",
         "options": [
-            {"id": "speed_run", "label": "⚡ Speed Run", "description": "Monday 20:00-00:00 ST - 2 Characters required"},
+            {"id": "speed_run", "label": "⚡ Speed Run", "description": "Monday 20:00-00:00 ST - Alt character preferred"},
             {"id": "chill", "label": "😎 Chill", "description": "Thursday 20:00-00:00 ST - 1 Character required"},
-            {"id": "both", "label": "🎯 Both", "description": "Both raiding days - 3 Characters required"},
+            {"id": "both", "label": "🎯 Both", "description": "Both raiding days - Alt character preferred for Speed Run"},
             {"id": "none", "label": "❌ None", "description": "I'm not interested"}
         ]
     },
@@ -121,6 +121,13 @@ APPLICATION_CONFIG = {
             "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
         ]
     }
+}
+
+# Question indices (0-based) that are optional per path.
+# When the user types 'skip' at any question in the set, all questions in that set are skipped.
+OPTIONAL_QUESTIONS = {
+    "speed_run": {2, 3},  # Alt character name and Alt Class/Spec
+    "both": {2, 3},       # Alt character name and Alt Class/Spec (Speedrun alt)
 }
 
 # Legacy support - will be removed after migration
@@ -622,7 +629,7 @@ async def process_guild_data(guild_id, paths):
                 try:
                     url = f"https://eu.api.blizzard.com/profile/wow/character/spineshatter/{character_name}/equipment"
                     params = {
-                        "namespace": "profile-classic1x-eu",
+                        "namespace": "profile-classicann-eu",
                         "locale": "en_GB"
                     }
                     headers = {'Authorization': f'Bearer {access_token}'}
@@ -1179,6 +1186,32 @@ async def handle_application_response(message):
         )
         await message.channel.send(embed=embed)
         return
+
+    # Handle 'skip' for optional question groups
+    path = app_data.get('path', '')
+    optional_indices = OPTIONAL_QUESTIONS.get(path, set())
+    current_index = app_data['question_index']
+    questions = app_data.get('questions', [])
+
+    if message.content.lower() == 'skip' and current_index in optional_indices:
+        # Fill N/A for all remaining optional questions in this group and advance
+        while app_data['question_index'] in optional_indices:
+            app_data['answers'].append("N/A")
+            app_data['question_index'] += 1
+        app_data['last_activity'] = asyncio.get_event_loop().time()
+        app_data['warning_sent'] = False
+        if app_data['question_index'] < len(questions):
+            embed = discord.Embed(title="📝 Next Question", color=0x00ff00)
+            embed.add_field(
+                name=f"Question {app_data['question_index'] + 1}/{len(questions)}",
+                value=questions[app_data['question_index']],
+                inline=False
+            )
+            embed.set_footer(text="Please respond with your answer. Type 'cancel' to cancel the application.")
+            await message.channel.send(embed=embed)
+        else:
+            await complete_application(message.author, app_data)
+        return
     
     # Check if user is still in path selection phase
     if app_data['question_index'] == -1:
@@ -1229,17 +1262,22 @@ async def handle_application_response(message):
     # Check if we have more questions
     if app_data['question_index'] < len(questions):
         # Send next question
+        next_index = app_data['question_index']
+        is_optional = next_index in optional_indices
         embed = discord.Embed(
             title="📝 Next Question",
             color=0x00ff00
         )
         embed.add_field(
-            name=f"Question {app_data['question_index'] + 1}/{len(questions)}",
-            value=questions[app_data['question_index']],
+            name=f"Question {next_index + 1}/{len(questions)}",
+            value=questions[next_index],
             inline=False
         )
-        embed.set_footer(text="Please respond with your answer. Type 'cancel' to cancel the application.")
-        
+        if is_optional:
+            embed.set_footer(text="This section is optional — type 'skip' to skip the alt character info. Type 'cancel' to cancel the application.")
+        else:
+            embed.set_footer(text="Please respond with your answer. Type 'cancel' to cancel the application.")
+
         await message.channel.send(embed=embed)
     else:
         # Application completed
@@ -1616,7 +1654,7 @@ class BotManagementView(discord.ui.View):
             await interaction.edit_original_response(content=f"❌ Error generating Excel report: {str(e)[:100]}...")
             logger.error(f"Error in attendance button: {e}", exc_info=True)
     
-    @discord.ui.button(label='Get Class Items', style=discord.ButtonStyle.primary, emoji='⚔️')
+    @discord.ui.button(label='Get Role Items', style=discord.ButtonStyle.primary, emoji='⚔️')
     async def get_class_items_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Check permissions - only allow Officers, Guild Leaders
         authorized_roles = ["Officer", "Guild Leader"]
@@ -1892,7 +1930,7 @@ async def setupHopium(ctx):
     
     guide_embed.add_field(
         name="📊 Excel Generation",
-        value="Use the buttons below to generate Excel reports:\n• **Get Attendance** - Guild attendance sheet\n• **Get Class Items** - Class-specific item sheet\n• **Get Loot** - Loot prio template sheet\n• **Get All** - All of the above in one file",
+        value="Use the buttons below to generate Excel reports:\n• **Get Attendance** - Guild attendance sheet\n• **Get Role Items** - Role sheets (Tank/DPS/Casters/Healers) per raid group\n• **Get Loot** - Loot sheet per raid group\n• **Get All** - All of the above in one file",
         inline=False
     )
     
@@ -1911,7 +1949,8 @@ async def setupHopium(ctx):
     
     # Delete the original command message
     try:
-        await ctx.message.delete()
+        if getattr(ctx, 'message', None) is not None:
+            await ctx.message.delete()
     except discord.NotFound:
         pass
     
@@ -3105,6 +3144,126 @@ async def upload_armory_file(ctx):
         except discord.NotFound:
             pass
 
+def get_character_role_sheet(player):
+    """Return which role sheet a player belongs to: Tank, DPS, Caster, or Healers."""
+    archetype = player.get("role", "") or ""
+    sub_archetype = player.get("sub_archetype", "") or ""
+    if archetype == "Tank":
+        return "Tank"
+    if archetype in ("Heal", "Healer"):
+        return "Healers"
+    if archetype == "DPS":
+        return "Caster" if sub_archetype == "Caster" else "DPS"
+    return None
+
+
+def character_can_use_item(player, itemOffNotes):
+    """
+    Check if a player can use an item based on officer notes.
+
+    Supports:
+      New role tags : <Tank> <DPS> <Caster> <Healer>
+      Class tags    : <Warrior> <Mage> etc.
+      Spec+Class    : <ArcaneMage> <FuryWarrior> <RestoShaman> etc.
+      Legacy role   : [Heal] [DPS] [Tank]  (backward compat with old TMB data)
+
+    When both class tags and legacy [Role] brackets coexist the old combined
+    logic is preserved so existing item-notes data keeps working correctly.
+    """
+    if not itemOffNotes:
+        return False
+
+    char_class     = player.get("class", "") or ""
+    char_spec      = player.get("spec", "") or ""
+    char_archetype = player.get("role", "") or ""
+    char_sub       = player.get("sub_archetype", "") or ""
+
+    all_tags      = re.findall(r'<([^>]+)>', itemOffNotes)
+    old_role_tags = re.findall(r'\[([^\]]+)\]', itemOffNotes)
+
+    if not all_tags and not old_role_tags:
+        return False
+
+    NEW_ROLE_TAGS = {"Tank", "DPS", "Caster", "Healer", "Healers", "Heal"}
+
+    new_role_tags  = []
+    class_tags     = []
+    spec_class_tags = []  # list of (spec_prefix, class_name)
+
+    for tag in all_tags:
+        tag = tag.strip()
+        if tag in NEW_ROLE_TAGS:
+            new_role_tags.append(tag)
+        elif tag in CLASS_LIST:
+            class_tags.append(tag)
+        else:
+            matched = False
+            for class_name in CLASS_LIST.keys():
+                if len(tag) > len(class_name) and tag.lower().endswith(class_name.lower()):
+                    spec_class_tags.append((tag[:-len(class_name)], class_name))
+                    matched = True
+                    break
+            if not matched:
+                class_tags.append(tag)
+
+    # New role tags are plain OR conditions
+    for tag in new_role_tags:
+        if tag == "Tank" and char_archetype == "Tank":
+            return True
+        if tag == "DPS" and char_archetype == "DPS" and char_sub != "Caster":
+            return True
+        if tag == "Caster" and char_archetype == "DPS" and char_sub == "Caster":
+            return True
+        if tag in ("Healer", "Healers", "Heal") and char_archetype in ("Heal", "Healer"):
+            return True
+
+    # Spec+Class combined tags are also plain OR
+    for spec_prefix, class_name in spec_class_tags:
+        if char_class == class_name and char_spec.lower().startswith(spec_prefix.lower()):
+            return True
+
+    # Class tags with legacy [Role] brackets — preserve old combined logic
+    if class_tags and old_role_tags:
+        class_match = char_class in class_tags
+        char_class_info = CLASS_LIST.get(char_class, {})
+        char_class_roles = char_class_info.get("roles", [])
+
+        if class_match:
+            role_filter_applies = any(role in char_class_roles for role in old_role_tags)
+            if not role_filter_applies:
+                return True
+            return char_archetype in old_role_tags
+        else:
+            for role in old_role_tags:
+                role_matches = (char_archetype == role or
+                                (role == "Heal" and char_archetype in ("Heal", "Healer")))
+                if role_matches:
+                    excluded = False
+                    for listed_class in class_tags:
+                        listed_info = CLASS_LIST.get(listed_class, {})
+                        listed_roles = listed_info.get("roles", [])
+                        if role in listed_roles or (role == "Heal" and "Heal" in listed_roles):
+                            excluded = True
+                            break
+                    if not excluded:
+                        return True
+            return False
+
+    elif class_tags:
+        return char_class in class_tags
+
+    elif old_role_tags:
+        for role in old_role_tags:
+            if role == "Heal" and char_archetype in ("Heal", "Healer"):
+                return True
+            if role == "Tank" and char_archetype == "Tank":
+                return True
+            if role == "DPS" and char_archetype == "DPS":
+                return True
+
+    return False
+
+
 def createExcel(guild_id, excelType):
     """Create Excel file with guild-specific data"""
     # Get guild-specific file paths
@@ -3159,23 +3318,59 @@ def createExcel(guild_id, excelType):
             playerParse = {}
 
     #Attendance Start
+    def get_reset_week_start(date_obj):
+        # WoW reset week starts on Wednesday.
+        days_since_wednesday = (date_obj.weekday() - 2) % 7
+        return date_obj - timedelta(days=days_since_wednesday)
+
+    def format_weekly_raid_note(note):
+        note_clean = str(note or "").strip()
+        note_lower = note_clean.lower()
+        # For chill runs, do not expose split details in the weekly cell.
+        if "chill run" in note_lower and "split" in note_lower:
+            return "Chill run"
+        return note_clean
+
     with open(paths['attendance_file'], newline='', encoding='utf-8') as csvfile:
-        csvreader = csv.reader(csvfile, delimiter=',', quotechar='|')
+        csvreader = csv.reader(csvfile, delimiter=',', quotechar='"')
         
         firstRow = next(csvreader)
         attendanceDates = []
+        attendanceWeekLabels = {}
+        week_group_raid_events = {}
         
         for row in csvreader:
-            date = datetime.strptime(row[0].replace('"', ''), "%Y-%m-%d %H:%M:%S").strftime("%d/%m/%y")
-            if not date in attendanceDates:
-                attendanceDates.append(date)
+            raid_datetime = datetime.strptime(row[0].replace('"', ''), "%Y-%m-%d %H:%M:%S")
+            week_start = get_reset_week_start(raid_datetime)
+            week_key = week_start.strftime("%d/%m/%y")
+            if week_key not in attendanceDates:
+                attendanceDates.append(week_key)
+                week_end = week_start + timedelta(days=6)
+                attendanceWeekLabels[week_key] = f"{week_start.strftime('%d/%m/%y')} - {week_end.strftime('%d/%m/%y')}"
             
             playerName = row[2].replace('"', '').capitalize()
+            raid_name = row[1].replace('"', '').strip() if len(row) > 1 else ""
+            raid_note = row[11].replace('"', '').strip() if len(row) > 11 else ""
+            raid_group = row[13].replace('"', '').strip() if len(row) > 13 else ""
             player = {}
             raids = []
             benchedRaids = []
             absentRaids = []
             unpreparedRaids = []
+            raidNotesByWeek = {}
+            raidGroupsByWeek = {}
+
+            if week_key not in week_group_raid_events:
+                week_group_raid_events[week_key] = {}
+            if raid_group not in week_group_raid_events[week_key]:
+                week_group_raid_events[week_key][raid_group] = set()
+
+            # Count unique raid events for the group in this reset week.
+            # Keying by (raid_datetime, raid_name) collapses per-character rows
+            # while still counting distinct raids of the same group in that week.
+            raid_datetime_key = raid_datetime.strftime("%Y-%m-%d %H:%M:%S")
+            raid_event_key = (raid_datetime_key, raid_name)
+            week_group_raid_events[week_key][raid_group].add(raid_event_key)
 
             try: 
                 if players[playerName]:
@@ -3184,25 +3379,45 @@ def createExcel(guild_id, excelType):
                     benchedRaids = player["benched_raids"]
                     absentRaids = player["absent_raids"]
                     unpreparedRaids = player["unprepared_raids"]
+                    raidNotesByWeek = player.get("raid_notes_by_week", {})
+                    raidGroupsByWeek = player.get("raid_groups_by_week", {})
             except:
                 player["name"] = playerName
+
+            if week_key not in raidNotesByWeek:
+                raidNotesByWeek[week_key] = []
+            if raid_note and raid_note not in raidNotesByWeek[week_key]:
+                raidNotesByWeek[week_key].append(raid_note)
+
+            if week_key not in raidGroupsByWeek:
+                raidGroupsByWeek[week_key] = []
+            if raid_group and raid_group not in raidGroupsByWeek[week_key]:
+                raidGroupsByWeek[week_key].append(raid_group)
             
             if row[6].replace('"', '') == "Benched":
-                benchedRaids.append(date)
+                if week_key not in benchedRaids:
+                    benchedRaids.append(week_key)
             elif row[6].replace('"', '') == "Gave notice":
-                absentRaids.append(date)
+                if week_key not in absentRaids:
+                    absentRaids.append(week_key)
             elif row[6].replace('"', '') == "Unprepared":
-                unpreparedRaids.append(date)
+                if week_key not in unpreparedRaids:
+                    unpreparedRaids.append(week_key)
             else:
-                raids.append(date)
+                if week_key not in raids:
+                    raids.append(week_key)
             
             player["raids"] = raids
             player["benched_raids"] = benchedRaids
             player["absent_raids"] = absentRaids
             player["unprepared_raids"] = unpreparedRaids
-            player["firstRaid"] = date
+            player["raid_notes_by_week"] = raidNotesByWeek
+            player["raid_groups_by_week"] = raidGroupsByWeek
+            player["firstRaid"] = week_key
             player["isInAttendance"] = True
             players[playerName] = player
+
+        attendanceDates.sort(key=lambda d: datetime.strptime(d, "%d/%m/%y"))
     #Attendance Finish
     
     #Loot Start
@@ -3224,6 +3439,8 @@ def createExcel(guild_id, excelType):
             player["benched_raids"] = []
             player["absent_raids"] = []
             player["unprepared_raids"] = []
+            player["raid_notes_by_week"] = {}
+            player["raid_groups_by_week"] = {}
             player["wishlist"] = "0/0"
             print("Player " + name + " is not present in the attendance file. Probably a new player or it's unclaimed on TMB.")
         
@@ -3260,26 +3477,40 @@ def createExcel(guild_id, excelType):
 
         player["race"] = playerInfo["race"]
         player["role"] = playerInfo["archetype"]
+        player["spec"] = playerInfo.get("spec") or "-"
         player["class"] = playerInfo["class"]
         player["is_alt"] = playerInfo["is_alt"]
+        player["sub_archetype"] = playerInfo.get("sub_archetype") or ""
         player["member_id"] = playerInfo["member_id"]
+        player["raid_group_name"] = playerInfo.get("raid_group_name") or "Unknown"
+        player["raid_group_color"] = playerInfo.get("raid_group_color")
         player["wishlist"] = str(sum)+"/"+str(len(wishlist))
         player["loot"] = loot
+        discord_name = (playerInfo.get("username") or "-").strip()
+        if discord_name and discord_name != "-":
+            discord_name = discord_name[:1].upper() + discord_name[1:]
+        player["discord_username"] = discord_name
         
         players[name] = player
     #Loot Finish
     
     #First Sheet Start
-    column_names = ["Name", "Class", "Race", "Raids", "Benched", "Attendance", "Items (+OS)", "MS Ratio", "Last MS", "Wishlist", "Best avg parse", "Median avr parse", "Last bench", "Name"]
+    # Wishlist is intentionally hidden for now (easy to restore later).
+    # To re-enable: add "Wishlist" back after "Last MS" and restore the commented Wishlist append block below.
+    # To restore Last MS: insert "Last MS" after "MS Ratio"
+    # To restore Last bench: insert "Last bench" after "Parses (Best|Median)"
+    column_names = ["Character", "Class", "Spec", "Race", "Player", "Raid", "Char", "Raids", "Benched", "Attendance", "Items (+OS)", "MS Ratio", "Parses (Best|Median)", "Character"]
     counter = 0
     for date in attendanceDates :
         counter += 1
         if counter == 20:
             counter = 0
             column_names.append("Name")
-        column_names.append(date)   
+        column_names.append(attendanceWeekLabels.get(date, date))   
     
     playerInfoList = []
+    raid_group_colors = {}
+    player_roles = {}
     
     for player in list(players.values()):
         try:
@@ -3289,16 +3520,6 @@ def createExcel(guild_id, excelType):
                 continue
         except:
             print("Removed player " + player["name"] + " since he's not in the roster.")
-            del players[player["name"]]
-            continue
-            
-        try:
-            if player["is_alt"]:
-                print("Removed player " + player["name"] + " since he's an alt.")
-                del players[player["name"]]
-                continue
-        except:
-            print("Removed player " + player["name"] + " since he's an alt.")
             del players[player["name"]]
             continue
             
@@ -3348,19 +3569,40 @@ def createExcel(guild_id, excelType):
                 if date == unprepared :
                     unprepared_b = True
                 
+            week_notes = player.get("raid_notes_by_week", {}).get(date, [])
+            week_groups = player.get("raid_groups_by_week", {}).get(date, [])
+
+            show_week_note = False
+            for group_name in week_groups:
+                group_raid_events = week_group_raid_events.get(date, {}).get(group_name, set())
+                # Multiple raids means at least 2 distinct raid events for the same group.
+                if len(group_raid_events) > 1:
+                    show_week_note = True
+                    break
+
+            display_notes = []
+            for week_note in week_notes:
+                formatted_note = format_weekly_raid_note(week_note)
+                if formatted_note and formatted_note not in display_notes:
+                    display_notes.append(formatted_note)
+            note_text = ", ".join(display_notes) if display_notes and show_week_note else ""
+
+            def build_week_cell(value_text):
+                return (note_text + " | " + value_text) if note_text else value_text
+
             if not found:
                 if benched:
                     if lastBench == "-":
                         lastBench = date
-                    playerDateInfo.append("Benched")
+                    playerDateInfo.append(build_week_cell("Benched"))
                 elif unprepared_b:
-                    playerDateInfo.append("Holiday")
+                    playerDateInfo.append(build_week_cell("Holiday"))
                 else:
                     if datetime.strptime(player["firstRaid"], "%d/%m/%y") > datetime.strptime(date, "%d/%m/%y"):
-                        playerDateInfo.append("N/A")
+                        playerDateInfo.append(build_week_cell("N/A"))
                     else:
                         absentRaids += 1
-                        playerDateInfo.append("Absent")
+                        playerDateInfo.append(build_week_cell("Absent"))
             else:
                 currentMsItems = 0
                 currentOsItems = 0
@@ -3372,7 +3614,9 @@ def createExcel(guild_id, excelType):
                     lootReceived = {}
                     
                 for loot in lootReceived.values():
-                    if loot["receivedDate"] == date:
+                    loot_date_obj = datetime.strptime(loot["receivedDate"], "%d/%m/%y")
+                    loot_week_key = get_reset_week_start(loot_date_obj).strftime("%d/%m/%y")
+                    if loot_week_key == date:
                         if loot["isOS"] == 0:
                             if lastReceivedItemDate == "-":
                                 lastReceivedItemDate = date
@@ -3383,7 +3627,7 @@ def createExcel(guild_id, excelType):
                     appendStr = "-"
                 else:
                     appendStr = itemsPlaceholders.replace("<MS>", str(currentMsItems)).replace("<OS>", str(currentOsItems))
-                playerDateInfo.append(appendStr)
+                playerDateInfo.append(build_week_cell(appendStr))
                 
                 msItems += currentMsItems
                 osItems += currentOsItems
@@ -3407,11 +3651,28 @@ def createExcel(guild_id, excelType):
             playerInfo.append(player["class"])
         except:
             playerInfo.append("-")
+        #Spec
+        try:
+            playerInfo.append(player.get("spec", "-"))
+        except:
+            playerInfo.append("-")
         #Race
         try:
             playerInfo.append(player["race"])
         except:
             playerInfo.append("-")
+        #Discord
+        try:
+            playerInfo.append(player.get("discord_username", "-"))
+        except:
+            playerInfo.append("-")
+        #Split
+        try:
+            playerInfo.append(player.get("raid_group_name", "Unknown"))
+        except:
+            playerInfo.append("Unknown")
+        #Char (Main/Alt)
+        playerInfo.append("Alt" if player.get("is_alt") else "Main")
         #Completed Raids
         playerInfo.append(completedRaids)
         #Benched Raids
@@ -3425,14 +3686,14 @@ def createExcel(guild_id, excelType):
         playerInfo.append(str(msItems) + " (" + str(osItems) + ")")
         playerInfo.append(msRatio)
         player["msRatio"] = msRatio
-        #Last Received Item
-        playerInfo.append(lastReceivedItemDate)
-        #Wishlist
-        try:
-            playerInfo.append(player["wishlist"])
-        except:
-            playerInfo.append("0/0")
-        #Parse Info
+        #Last MS (disabled - to restore: add "Last MS" after "MS Ratio" in column_names)
+        # playerInfo.append(lastReceivedItemDate)
+        #Wishlist (disabled for now)
+        # try:
+        #     playerInfo.append(player["wishlist"])
+        # except:
+        #     playerInfo.append("0/0")
+        #Parse Info (merged as Best|Median)
         best_avg = player.get("bestPerformanceAverage", 0)
         median_avg = player.get("medianPerformanceAverage", 0)
         
@@ -3447,10 +3708,11 @@ def createExcel(guild_id, excelType):
         except (ValueError, TypeError):
             median_avg = 0
         
-        playerInfo.append(f"{best_avg:.1f}" if best_avg != 0 else "-")
-        playerInfo.append(f"{median_avg:.1f}" if median_avg != 0 else "-")
-        #Last bench
-        playerInfo.append(lastBench)
+        best_str = f"{best_avg:.1f}" if best_avg != 0 else "-"
+        median_str = f"{median_avg:.1f}" if median_avg != 0 else "-"
+        playerInfo.append(f"{best_str} | {median_str}")
+        #Last bench (disabled - to restore: add "Last bench" after "Parses (Best|Median)" in column_names)
+        # playerInfo.append(lastBench)
         #Spacer
         try:
             name = player["name"].capitalize()
@@ -3466,86 +3728,161 @@ def createExcel(guild_id, excelType):
         
         #Add
         playerInfoList.append(playerInfo)
+        player_roles[playerInfo[0]] = str(player.get("role") or "").strip().upper()
+        raid_group_name = player.get("raid_group_name") or "Unknown"
+        raid_group_color = player.get("raid_group_color")
+        if raid_group_name not in raid_group_colors and raid_group_color:
+            raid_group_colors[raid_group_name] = raid_group_color
     
     workbook = Workbook()
     sheet = workbook.active
-    
-    if excelType == "Attendance" or excelType == "All" :
-        sheet.title = "Attendance"
-        sheet.auto_filter.ref = "A1:BZ1"
-    
-        sorted_data = sorted(playerInfoList, key=lambda x: (x[1], x[5]), reverse=True)
-            
+
+    def render_attendance_sheet(target_sheet, sheet_name, attendance_rows):
+        target_sheet.title = sheet_name[:31]
+        target_sheet.auto_filter.ref = "A1:BZ1"
+
+        def normalize_raid_group_color(raw_color):
+            if raw_color is None:
+                return None
+
+            color_str = str(raw_color).strip()
+            if not color_str:
+                return None
+
+            if color_str.startswith("#"):
+                color_str = color_str[1:]
+
+            if len(color_str) == 6:
+                try:
+                    int(color_str, 16)
+                    return color_str.upper()
+                except ValueError:
+                    pass
+
+            try:
+                return f"{int(float(color_str)):06X}"[-6:]
+            except (ValueError, TypeError):
+                return None
+
+        def soften_hex_color(hex_color, blend_ratio=0.72):
+            """Blend a hex color toward white to improve readability in sheet cells."""
+            if not hex_color or len(hex_color) != 6:
+                return hex_color
+            try:
+                r = int(hex_color[0:2], 16)
+                g = int(hex_color[2:4], 16)
+                b = int(hex_color[4:6], 16)
+            except ValueError:
+                return hex_color
+
+            r = int(r + (255 - r) * blend_ratio)
+            g = int(g + (255 - g) * blend_ratio)
+            b = int(b + (255 - b) * blend_ratio)
+            return f"{r:02X}{g:02X}{b:02X}"
+
+        # Sort by Class, then Attendance.
+        sorted_data = sorted(attendance_rows, key=lambda x: (x[1], x[9]), reverse=True)
+
         for col_num, column_name in enumerate(column_names, start=1):
-            cell = sheet.cell(row=1, column=col_num, value=column_name)
+            cell = target_sheet.cell(row=1, column=col_num, value=column_name)
             cell.fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
             cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            #cell.fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+            cell.alignment = Alignment(horizontal="left", vertical="center")
 
+        data_row_count = len(sorted_data)
         for row_num, row_data in enumerate(sorted_data, start=2):
             for col_num, cell_value in enumerate(row_data, start=1):
-                cell = sheet.cell(row=row_num, column=col_num, value=cell_value)
-                
-                cell.alignment = Alignment(horizontal="center")        
-                if col_num == 4 or col_num == 5 or col_num == 8 or col_num == 11 or col_num == 12:
-                    for row in range(2, len(players) + 2):
-                        sheet.cell(row=row, column=col_num).number_format = "0"  # Numeric format
-                if col_num == 6:
-                    for row in range(2, len(players) + 2):
-                        sheet.cell(row=row, column=col_num).number_format = "0.00%"
-                if col_num == 9 or col_num == 13:
-                    for row in range(2, len(players) + 2):
-                        sheet.cell(row=row, column=col_num).number_format = "DD/MM"
+                cell = target_sheet.cell(row=row_num, column=col_num, value=cell_value)
 
+                cell.alignment = Alignment(horizontal="center")
+                if col_num == 8 or col_num == 9 or col_num == 12:
+                    for row in range(2, data_row_count + 2):
+                        target_sheet.cell(row=row, column=col_num).number_format = "0"  # Numeric format
+                if col_num == 10:
+                    for row in range(2, data_row_count + 2):
+                        target_sheet.cell(row=row, column=col_num).number_format = "0.00%"
+                # DD/MM date format - disabled (Last MS was col 12, Last bench was col 14)
+                # if col_num == 12 or col_num == 14:
+                #     for row in range(2, data_row_count + 2):
+                #         target_sheet.cell(row=row, column=col_num).number_format = "DD/MM"
 
         column_sizes = {
-            "Name": 22,
+            "Character": 22,
             "Class": 12,
+            "Spec": 17,
             "Race": 12,
-            "Raids": 14,
-            "Benched": 14,
+            "Raids": 10,
+            "Benched": 13,
             "Attendance": 16,
             "Items (+OS)": 14,
-            "MS Ratio": 14,
+            "MS Ratio": 12,
             "Last MS": 14,
-            "Whishlist": 14,
-            "Best avg parse": 18,
-            "Median avr parse": 18,
+            "Parses (Best|Median)": 24,
+            "Char": 10,
             "OS Items": 16,
             "OS Ratio": 14,
             "Last Bench": 16,
-            "Default": 14
+            "Player": 22,
+            "Raid": 12,
+            "Default": 22
         }
         # Adjust column widths
         for col_num, column_name in enumerate(column_names, start=1):
             column_letter = get_column_letter(col_num)
-            
+
             try:
                 size = column_sizes[column_name]
             except:
                 size = column_sizes["Default"]
-                        
-            sheet.column_dimensions[column_letter].width = max(len(column_name), size)
-            
+
+            target_sheet.column_dimensions[column_letter].width = max(len(column_name), size)
+
             for row in range(2, 80):
-                cell = sheet[column_letter + str(row)]
+                cell = target_sheet[column_letter + str(row)]
                 if cell.value is not None:
                     cell.alignment = Alignment(horizontal="center")
 
                     thin_border = Side(border_style="thin", color="000000")  # Black thin border
                     cell.border = Border(top=thin_border, bottom=thin_border, left=thin_border, right=thin_border)
-                    
+
                     cell.font = Font(name="Aptos Light", bold=False)
-                        
-                    if column_name == "Name" or column_name == "Class":
+
+                    if column_name == "Character" or column_name == "Class":
                         value = cell.value
-                        if column_name == "Name":
+                        if column_name == "Character":
                             cell.alignment = Alignment(horizontal="left")
                             cell.font = Font(name="Aptos", bold=True)
-                            value = sheet["B" + str(row)].value
+                            value = target_sheet["B" + str(row)].value
                         bgcolor = CLASS_LIST.get(value, {}).get("color", "CCCCCC")
                         cell.fill = PatternFill(start_color=bgcolor, end_color=bgcolor, fill_type="solid")
+                    elif column_name == "Spec":
+                        cell.alignment = Alignment(horizontal="left")
+                        cell.font = Font(name="Aptos", bold=True, color="1F2937")
+                        role = player_roles.get(target_sheet["A" + str(row)].value, "")
+                        role_color = {
+                            "DPS": "E8B4B8",
+                            "HEAL": "B7E4C7",
+                            "TANK": "B6CCFE",
+                        }.get(role)
+                        if role_color:
+                            cell.fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
+                    elif column_name == "Player":
+                        cell.alignment = Alignment(horizontal="left")
+                        cell.font = Font(name="Aptos", bold=True)
+                    elif column_name == "Raid":
+                        cell.alignment = Alignment(horizontal="left")
+                        cell.font = Font(name="Aptos", bold=True, color="1F2937")
+                        fill_color = normalize_raid_group_color(raid_group_colors.get(str(cell.value)))
+                        if fill_color:
+                            soft_fill_color = soften_hex_color(fill_color)
+                            cell.fill = PatternFill(start_color=soft_fill_color, end_color=soft_fill_color, fill_type="solid")
+                    elif column_name == "Char":
+                        cell.alignment = Alignment(horizontal="left")
+                        cell.font = Font(name="Aptos", bold=True, color="1F2937")
+                        if cell.value == "Main":
+                            cell.fill = PatternFill(start_color="CFEAD6", end_color="CFEAD6", fill_type="solid")
+                        else:
+                            cell.fill = PatternFill(start_color="D6E4FF", end_color="D6E4FF", fill_type="solid")
                     elif column_name == "Race":
                         bgcolor = "CCCCCC"
                         if cell.value == "Dwarf":
@@ -3554,6 +3891,10 @@ def createExcel(guild_id, excelType):
                             bgcolor = "FFF468"
                         elif cell.value == "Human":
                             bgcolor = "F48CBA"
+                        elif cell.value == "Draenei":
+                            bgcolor = "00FF98"
+                        elif cell.value == "Blood Elf":
+                            bgcolor = "33937F"
                         elif cell.value == "Night Elf":
                             bgcolor = "0070DD"
                         elif cell.value == "Orc":
@@ -3573,56 +3914,82 @@ def createExcel(guild_id, excelType):
                         cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
                     elif column_name == "MS Ratio":
                         start_color = (255, 255, 255)
-                        end_color = (186, 72, 177) 
+                        end_color = (186, 72, 177)
                         if cell.value != "-" and cell.value is not None:
                             percentage = float(cell.value)
                             color = calculate_gradient_color(percentage, start_color, end_color)
                             cell.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
-                    elif column_name == "Wishlist":
-                        if cell.value == "0/0":
-                            cell.value = "Empty"
-                            cell.fill = PatternFill(start_color="FF9C00", end_color="FF9C00", fill_type="solid")
-                        elif cell.value.split("/")[0] == cell.value.split("/")[1]:
-                            cell.fill = PatternFill(start_color="75F94D", end_color="75F94D", fill_type="solid")
-                    elif column_name == "Best avg parse" or column_name == "Median avr parse":
-                        if cell.value != "-" and cell.value is not None:
-                            start_color = (255, 255, 255)
-                            end_color = (66, 133, 244) 
-                            value = float(cell.value)
-                            color = "66664E"
-                            if value == 100:
-                                color = "E5A93F"
-                            elif value >= 99:
-                                color = "BE49A8"
-                            elif value >= 95:
-                                color = "FF8000"
-                            elif value >= 75:
-                                color = "A335EE"
-                            elif value >= 50:
-                                color = "0961FE"
-                            elif value >= 25:
-                                color = "0961FE"
-                            cell.font = Font(name="Aptos", bold=True, color=color)
-                    elif col_num > 14: # N
+                    elif column_name == "Parses (Best|Median)":
+                        if cell.value and cell.value != "- | -":
+                            try:
+                                best_part = str(cell.value).split("|")[0].strip()
+                                value = float(best_part) if best_part != "-" else 0
+                            except (ValueError, TypeError):
+                                value = 0
+
+                            if value > 0:
+                                color = "66664E"
+                                if value == 100:
+                                    color = "E5A93F"
+                                elif value >= 99:
+                                    color = "BE49A8"
+                                elif value >= 95:
+                                    color = "FF8000"
+                                elif value >= 75:
+                                    color = "A335EE"
+                                elif value >= 50:
+                                    color = "0961FE"
+                                elif value >= 25:
+                                    color = "0961FE"
+                                cell.font = Font(name="Aptos", bold=True, color=color)
+                    elif col_num > 14:
                         bgcolor = "CCCCCC"
                         cell.font = Font(name="Aptos Light", bold=True)
-                        if cell.value == "N/A":
+                        cell_value = str(cell.value)
+                        base_value = cell_value
+                        raid_note = ""
+                        if " | " in cell_value:
+                            raid_note, base_value = cell_value.rsplit(" | ", 1)
+                            base_value = base_value.strip()
+                            raid_note = raid_note.strip().lower()
+
+                        if base_value == "N/A":
                             bgcolor = "FFFFFF"
                             cell.value = ""
-                        elif cell.value == "Benched":
+                        elif base_value == "Benched":
                             bgcolor = "9DC0FA"
-                        elif cell.value == "Absent":
+                        elif base_value == "Absent":
                             bgcolor = "FF9C00"
-                        elif cell.value == "Holiday":
+                        elif base_value == "Holiday":
                             bgcolor = "00FFFF"
-                        elif cell.value == "-":
-                            bgcolor = "A1FB8E"
+                        elif base_value == "-":
+                            if "Split 1" in raid_note:
+                                if raid_group_name == "Speed Run":
+                                    bgcolor = "8BEFA8"
+                                else:
+                                    bgcolor = "FFD98A"
+                            elif "Split 2" in raid_note:
+                                bgcolor = "7FD1FF"
+                            else:
+                                bgcolor = "A1FB8E"
                         else:
-                            bgcolor = "75F94D"
-                            if cell.value.startswith("0"):
+                            if "Split 1" in raid_note:
+                                if raid_group_name == "Speed Run":
+                                    bgcolor = "72E89A"
+                                else:
+                                    bgcolor = "F7CA6A"
+                            elif "Split 2" in raid_note:
+                                bgcolor = "69C4F7"
+                            else:
+                                bgcolor = "75F94D"
+                            if base_value.startswith("0"):
                                 cell.font = Font(name="Aptos Light", bold=False)
                         cell.fill = PatternFill(start_color=bgcolor, end_color=bgcolor, fill_type="solid")
-        print("Create attendance sheet with " + str(len(players)) + " players.")
+
+        print("Create attendance sheet '" + target_sheet.title + "' with " + str(data_row_count) + " players.")
+    
+    if excelType == "Attendance" or excelType == "All" :
+        render_attendance_sheet(sheet, "Attendance", playerInfoList)
     else:
         # If we're not creating an attendance sheet, remove the empty active sheet
         # We'll add other sheets later, so this prevents an empty first sheet
@@ -3646,7 +4013,7 @@ def createExcel(guild_id, excelType):
 
             itemNotes = row[5].replace('"', '')
             itemOffNotes = row[6].replace('"', '')
-            itemTier = row[7].replace('"', '')
+            tier_label = row[8].replace('"', '')
 
             item = {}
             item["itemName"] = itemName
@@ -3655,9 +4022,9 @@ def createExcel(guild_id, excelType):
             item["itemSource"] = itemSource
             item["itemNotes"] = itemNotes
             item["itemOffNotes"] = itemOffNotes
-            item["itemTier"] = itemTier
+            item["tier_label"] = tier_label
 
-            if itemTier and itemOffNotes:
+            if tier_label and itemOffNotes:
                 itemList[itemId] = item
     # Loading file finish
 
@@ -3673,372 +4040,98 @@ def createExcel(guild_id, excelType):
 
 
     if excelType == "Loot" or excelType == "All" :
-        # Create loot items sheet
-        allLootSheet = workbook.create_sheet(title="Loot")
         raidList = {
             "Molten Core": "E26B0A",
             "Blackwing Lair": "C0504D",
             "Temple of Ahn'Qiraj": "4F6228",
             "Naxxramas": "403151",
             "Magtheridon's Lair": "403151",
-            "Gruul's Lair": "C0504D"
-            }
-        
-        # Create role to classes mapping
-        roleToClasses = {}
-        for class_name, class_info in CLASS_LIST.items():
-            for role in class_info["roles"]:
-                if role not in roleToClasses:
-                    roleToClasses[role] = []
-                roleToClasses[role].append(class_name)
+            "Gruul's Lair": "C0504D",
+            "Tempest Keep": "DAB1DA",
+            "Serpentshrine Cavern": "4F6228",
+        }
 
-        i = 1
-        for raid in raidList.keys():
-            raidItems = {}
-            for itemId, item in itemList.items():
-                if item["itemInstance"] == raid:
-                    raidItems[itemId] = item
-            if not raidItems:
-                continue
-            allLootSheet.merge_cells(start_row=i, start_column=1, end_row=i, end_column=5)
-            cell = allLootSheet.cell(row=i, column=1, value=raid)
-            cell.fill = PatternFill(start_color=raidList[raid], end_color=raidList[raid], fill_type="solid")
-            i += 1
-            for raidItem in raidItems.values():
-                raidItemName = raidItem["itemName"]
-                itemOffNotes = raidItem["itemOffNotes"]
-                lootRow = ["", raidItem["itemId"], raidItemName, raidItem["itemNotes"] ,raidItem["itemTier"], "","",""]
-                for player in players.values():
-                    # Parse itemOffNotes to extract classes and roles
-                    raidItemClasses = []
-                    raidItemRoles = []
+        loot_raid_groups = sorted(set(p.get("raid_group_name", "Unknown") for p in players.values()))
+        if not loot_raid_groups:
+            loot_raid_groups = ["Unknown"]
 
-                    # Extract classes from < >
-                    class_matches = re.findall(r'<([^>]+)>', itemOffNotes)
-                    for match in class_matches:
-                        raidItemClasses.append(match.strip())
-
-                    # Extract roles from [ ]
-                    role_matches = re.findall(r'\[([^\]]+)\]', itemOffNotes)
-                    for match in role_matches:
-                        raidItemRoles.append(match.strip())
-
-                    # Get player info
-                    player_class = player.get("class")
-                    player_class_info = CLASS_LIST.get(player_class, {})
-                    player_role = player.get("role")
-
-                    # Simplified filtering logic
-                    can_use_item = False
-
-                    if raidItemClasses and not raidItemRoles:
-                        # Only classes specified - filter by class
-                        can_use_item = player_class in raidItemClasses
-
-                    elif raidItemRoles and not raidItemClasses:
-                        # Only roles specified - filter by role
-                        can_use_item = player_role in raidItemRoles
-
-                    elif raidItemClasses and raidItemRoles:
-                        # Both classes and roles specified - filter by roles + class compatibility
-                        class_match = player_class in raidItemClasses
-                        role_match = player_role in raidItemRoles
-                        class_roles = player_class_info.get("roles", [])
-
-                        isRoleToFilter = any(role in class_roles for role in raidItemRoles)
-
-                        if class_match and role_match:
-                            can_use_item = True
-
-                        elif class_match and not isRoleToFilter:
-                            can_use_item = True 
-
-                        elif not class_match:
-                            for otherClass in raidItemClasses:
-                                player_class_info = CLASS_LIST.get(otherClass, {})
-                                other_class_roles = player_class_info.get("roles", [])
-                                can_use_item = True
-                                if player_role in other_class_roles:
-                                    can_use_item = False
-                                    break
-
-                    if not can_use_item:
-                        continue
-
-                    playerName = player["name"].capitalize()
-                    found = False
-                    try:
-                        playerArmory = armoryList[playerName]
-                    except KeyError:
-                        playerArmory = []
-                        armoryList[playerName] = playerArmory
-                    for armoryItem in armoryList[playerName]:
-                        if armoryItem == raidItemName:
-                            found = True
-                        elif raidItemName == "Head of Nefarian":
-                            if armoryItem == "Master Dragonslayer's Medallion" or armoryItem == "Master Dragonslayer's Orb" or armoryItem == "Master Dragonslayer's Ring":
-                                found = True
-                        elif raidItemName == "Eye of C'Thun":
-                            if armoryItem == "Amulet of the Fallen God" or armoryItem == "Cloak of the Fallen God" or armoryItem == "Ring of the Fallen God":
-                                found = True
-                        elif raidItemName == "Vek'nilash's Circlet":
-                            if armoryItem == "Conqueror's Crown" or armoryItem == "Doomcaller's Circlet" or armoryItem == "Enigma Circlet" or armoryItem == "Tiara of the Oracle":
-                                found = True
-
-                    for loot in player["loot"].values():
-                        if loot["name"] == raidItemName:
-                            found = True
-                    if not found:
-                        lootRow.append(f'{playerName} ({player["attendance"]}% - {player["msRatio"]})')
-                    
-                allLootSheet.append(lootRow)
-                i += 1
-
-        instanceColor = raidList.get("Molten Core", "E26B0A")
-        thin = Side(border_style="thin", color="000000")
-        for row in allLootSheet.iter_rows(min_row=1, max_row=allLootSheet.max_row):
-            if row[0].value is None or row[0].value == "" and row[1].value is None or row[1].value == "":
-                allLootSheet.row_dimensions[row[0].row].height = iconHeight
+        for loot_raid_group in loot_raid_groups:
+            loot_group_players = {name: p for name, p in players.items()
+                                  if p.get("raid_group_name") == loot_raid_group}
+            if not loot_group_players:
                 continue
 
-            if row[0].value is not None and row[0].value != "":
-                allLootSheet.row_dimensions[row[0].row].height = iconHeight
-                row[0].font = Font(name="Aptos", bold=True, color="FFFFFF",  size=16)
-                row[0].alignment = Alignment(horizontal="center", vertical="center")
-                instanceColor = row[0].fill.start_color.index
-                continue
+            sheet_title = f"{loot_raid_group} Loot"
+            if len(sheet_title) > 31:
+                sheet_title = sheet_title[:31]
+            allLootSheet = workbook.create_sheet(title=sheet_title)
 
-            row[0].fill = PatternFill(start_color=instanceColor, end_color=instanceColor, fill_type="solid")
-            item_id_cell = row[1]  # Assuming itemId is in the first column
-            item_id = str(item_id_cell.value)
-            allLootSheet.row_dimensions[item_id_cell.row].height = iconHeight
-                
-            if item_id not in itemsIcons.keys():
-                try:
-                    media_url = f'https://eu.api.blizzard.com/data/wow/media/item/{item_id}?namespace=static-classic-eu&locale=en_GB'
-                    urlHeaders = {'Authorization': f'Bearer {access_token}'}
-                    media_response = requests.get(media_url, headers=urlHeaders)
-                    icon_url = media_response.json()['assets'][0]['value']
-                    itemsIcons[item_id] = icon_url
-                except:
-                    print("Error fetching media for loot item:", loot["name"])
-
-            icon_url = itemsIcons.get(item_id)
-            if icon_url:
-            # Set the cell to use the IMAGE formula
-                item_id_cell.value = f'=IMAGE("{icon_url}", 2)'
-            row[1].border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-            row[2].alignment = Alignment(horizontal="left", vertical="center")
-            row[2].font = Font(name="Aptos", bold=True)
-            row[2].border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-            if row[3].value is not None and row[3].value != "":
-                notes = row[3].value
-                row[3].value = '=IMAGE("https://render.worldofwarcraft.com/classic-eu/icons/56/inv_misc_questionmark.jpg", 2)'
-                row[3].comment = Comment(text=notes, author="")
-            else:
-                allLootSheet.merge_cells(start_row=item_id_cell.row, start_column=3, end_row=item_id_cell.row, end_column=4)
-            row[3].border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-            row[4].alignment = Alignment(horizontal="center", vertical="center")
-            row[4].font = Font(name="Aptos", bold=True)
-            row[4].border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-            if row[4].value == "1" or row[4].value == "S":
-                row[4].fill = PatternFill(start_color="32C3F6", end_color="32C3F6", fill_type="solid")
-            elif row[4].value == "2" or row[4].value == "A":
-                row[4].fill = PatternFill(start_color="20FF26", end_color="20FF26", fill_type="solid")
-            elif row[4].value == "3" or row[4].value == "B":
-                row[4].fill = PatternFill(start_color="F7FF26", end_color="F7FF26", fill_type="solid")
-            elif row[4].value == "4" or row[4].value == "C":
-                row[4].fill = PatternFill(start_color="FF734D", end_color="FF734D", fill_type="solid")
-            elif row[4].value == "5" or row[4].value == "D":
-                row[4].fill = PatternFill(start_color="F30026", end_color="F30026", fill_type="solid")
-            elif row[4].value == "6" or row[4].value == "F":
-                row[4].fill = PatternFill(start_color="CC3071", end_color="CC3071", fill_type="solid")
-
-            foundTheEnd = False
-            index = 8
-            while not foundTheEnd:
-                cell = row[index]
-                if cell.value is None or cell.value == "":
-                    foundTheEnd = True
-                else:
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-                    cell.font = Font(name="Aptos", bold=True)
-                    cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-                    playerName = cell.value.split(" (")[0].strip()
-                    player = players[playerName.capitalize()]
-                    classColor = CLASS_LIST.get(player["class"], {}).get("color", "CCCCCC")
-                    cell.fill = PatternFill(start_color=classColor, end_color=classColor, fill_type="solid")
-
-                index += 1
-                if index >= len(row):
-                    foundTheEnd = True
-
-
-        for column in allLootSheet.columns:
-            column_letter = get_column_letter(column[0].column)
-            column_size = 30
-            if column_letter == "B" or column_letter == "D" or column_letter == "E":
-                column_size = 4.5
-            elif column_letter == "A":
-                column_size = 4
-            elif column_letter == "C":
-                column_size = 45
-            
-            allLootSheet.column_dimensions[column_letter].width = column_size
-
-    if excelType == "Class Items" or excelType == "All" :
-        wowClasses.sort()
-        # Create item sheets
-        for wowClass in wowClasses:
-
-            classColor = "DDDDDD"
-            classBgColor = "DDDDDD"
-            classBgColor = CLASS_LIST.get(wowClass, {}).get("color", "DDDDDD")
-            fontColor = "000000"
-
-            hasValues = False
-            classSheet = workbook.create_sheet(title=wowClass)
-
-            sheetPlayer = {}
-            
-            headers = [" ", " ", " ", " ", " "]
-            # Header
-            for player in players.values():
-                try:
-                    if player["class"] == wowClass:
-                        sheetPlayer[player["name"].capitalize()] = player
-                        headers.append(player["name"].capitalize())
-                except KeyError:
-                    print(f"Warning: Player {player} does not have a class defined. Skipping.")
-
-            headers.append(" ")
-
-                    # Data
-            classItems = []
-            for itemId, item in itemList.items():
-            
-                itemOffNotes = item.get("itemOffNotes", "")
-                # Parse itemOffNotes to extract classes and roles
-                raidItemClasses = []
-                raidItemRoles = []
-
-                # Extract classes from < >
-                class_matches = re.findall(r'<([^>]+)>', itemOffNotes)
-                for match in class_matches:
-                    raidItemClasses.append(match.strip())
-
-                # Extract roles from [ ]
-                role_matches = re.findall(r'\[([^\]]+)\]', itemOffNotes)
-                for match in role_matches:
-                    raidItemRoles.append(match.strip())
-                
-                wow_class_info = CLASS_LIST.get(wowClass, {})
-
-                # Simplified filtering logic
-                can_use_item = False
-
-                if raidItemClasses and not raidItemRoles:
-                    # Only classes specified - filter by class
-                    can_use_item = wowClass in raidItemClasses
-
-                elif raidItemRoles and not raidItemClasses:
-                    # Only roles specified - filter by role
-                    can_use_item = any(role in raidItemRoles for role in wow_class_info.get("roles", []))
-
-                elif raidItemClasses and raidItemRoles:
-                    # Both classes and roles specified - filter by roles + class compatibility
-                    class_match = wowClass in raidItemClasses
-                    wow_class_roles = wow_class_info.get("roles", [])
-                    role_match = any(role in wow_class_roles for role in raidItemRoles)
-
-                    if class_match:
-                        can_use_item = True
-                    else:
-                        foundRoles = wow_class_roles
-                        can_use_item = True
-                        for otherClass in raidItemClasses:
-                            other_class_info = CLASS_LIST.get(otherClass, {})
-                            other_class_roles = other_class_info.get("roles", [])
-                            for role in wow_class_roles:
-                                if role in other_class_roles:
-                                    foundRoles.remove(role)
-
-                            if not foundRoles:
-                                can_use_item = False
-                                break
-
-                if can_use_item:
-                    if hasValues == False:
-                        hasValues = True
-                    classItems.append(item)
-
-            print("Class " + wowClass + " has " + str(len(classItems)) + " items.")
-            
-            for col_num, header in enumerate(headers, start=1):
-                thin = Side(border_style="thin", color="000000")
-
-                column_letter = get_column_letter(col_num)
-                cell = classSheet.cell(row=1, column=col_num, value=header)
-                if cell.value != " ":
-                    cell.fill = PatternFill(start_color=classColor, end_color=classColor, fill_type="solid") 
-                    cell.border = Border(thin, thin, thin, thin)
-                else:
-                    cell.fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
-                cell.font = Font(name="Aptos", bold=True, color=fontColor)
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                
-                column_size = 16
-                if col_num == 1:
-                    column_size = 4
-                elif col_num == 2:
-                    column_size = 4.5
-                elif col_num == 3:
-                    column_size = 45
-                elif col_num == 4:
-                    column_size = 5
-                elif col_num == 5:
-                    column_size = 5
-                elif col_num == len(sheetPlayer) + 6:
-                    column_size = 4
-                classSheet.column_dimensions[column_letter].width = column_size
-            
-            totalRows = len(classItems) + 2
-            for item in classItems:
-                itemData = [""]
-                itemData.append(item["itemId"])
-                itemData.append(item["itemName"])
-                itemData.append(item["itemNotes"])
-                itemData.append(item["itemTier"])
-                classSheet.append(itemData)
-                #if item["itemNotes"]:
-                #    itemData = ["", ""]
-                #    itemData.append(item["itemNotes"])
-                #    totalRows += 1
-                #    classSheet.append(itemData)
-
-            
-            for row in classSheet.iter_rows(min_row=2, max_row=classSheet.max_row):
-                row[0].fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
-                row[len(sheetPlayer)+5].fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
-                item_id_cell = row[1]  # Assuming itemId is in the first column
-                item_id = str(item_id_cell.value)
-
-                classSheet.row_dimensions[item_id_cell.row].height = iconHeight
-                if item_id is None or item_id == "":
-                    current_row = item_id_cell.row
-                    start_col = 3
-                    end_col = len(sheetPlayer) + 5
-                    classSheet.merge_cells(start_row=current_row, start_column=start_col, end_row=current_row, end_column=end_col)
-                    row[2].alignment = Alignment(horizontal="left", vertical="top")
-                    row[2].font = Font(name="Aptos", bold=False)
-                    row[2].fill = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid")
+            i = 1
+            for raid in raidList.keys():
+                raidItems = {}
+                for itemId, item in itemList.items():
+                    if item["itemInstance"] == raid:
+                        raidItems[itemId] = item
+                if not raidItems:
                     continue
-                
+                allLootSheet.merge_cells(start_row=i, start_column=1, end_row=i, end_column=5)
+                cell = allLootSheet.cell(row=i, column=1, value=raid)
+                cell.fill = PatternFill(start_color=raidList[raid], end_color=raidList[raid], fill_type="solid")
+                i += 1
+                for raidItem in raidItems.values():
+                    raidItemName = raidItem["itemName"]
+                    itemOffNotes = raidItem["itemOffNotes"]
+                    lootRow = ["", raidItem["itemId"], raidItemName, raidItem["itemNotes"], raidItem["tier_label"], "", "", ""]
+                    for player in loot_group_players.values():
+                        if not character_can_use_item(player, itemOffNotes):
+                            continue
+                        playerName = player["name"].capitalize()
+                        found = False
+                        try:
+                            playerArmory = armoryList[playerName]
+                        except KeyError:
+                            playerArmory = []
+                            armoryList[playerName] = playerArmory
+                        for armoryItem in armoryList[playerName]:
+                            if armoryItem == raidItemName:
+                                found = True
+                            elif raidItemName == "Head of Nefarian":
+                                if armoryItem == "Master Dragonslayer's Medallion" or armoryItem == "Master Dragonslayer's Orb" or armoryItem == "Master Dragonslayer's Ring":
+                                    found = True
+                            elif raidItemName == "Eye of C'Thun":
+                                if armoryItem == "Amulet of the Fallen God" or armoryItem == "Cloak of the Fallen God" or armoryItem == "Ring of the Fallen God":
+                                    found = True
+                            elif raidItemName == "Vek'nilash's Circlet":
+                                if armoryItem == "Conqueror's Crown" or armoryItem == "Doomcaller's Circlet" or armoryItem == "Enigma Circlet" or armoryItem == "Tiara of the Oracle":
+                                    found = True
+                        for loot in player["loot"].values():
+                            if loot["name"] == raidItemName:
+                                found = True
+                        if not found:
+                            alt_label = " [A]" if player.get("is_alt") else ""
+                            lootRow.append(f'{playerName}{alt_label} ({player["attendance"]}% - {player["msRatio"]})')
+                    allLootSheet.append(lootRow)
+                    i += 1
+
+            instanceColor = raidList.get("Molten Core", "E26B0A")
+            thin = Side(border_style="thin", color="000000")
+            for row in allLootSheet.iter_rows(min_row=1, max_row=allLootSheet.max_row):
+                if row[0].value is None or row[0].value == "" and row[1].value is None or row[1].value == "":
+                    allLootSheet.row_dimensions[row[0].row].height = iconHeight
+                    continue
+
+                if row[0].value is not None and row[0].value != "":
+                    allLootSheet.row_dimensions[row[0].row].height = iconHeight
+                    row[0].font = Font(name="Aptos", bold=True, color="FFFFFF", size=16)
+                    row[0].alignment = Alignment(horizontal="center", vertical="center")
+                    instanceColor = row[0].fill.start_color.index
+                    continue
+
+                row[0].fill = PatternFill(start_color=instanceColor, end_color=instanceColor, fill_type="solid")
+                item_id_cell = row[1]
+                item_id = str(item_id_cell.value)
+                allLootSheet.row_dimensions[item_id_cell.row].height = iconHeight
+
                 if item_id not in itemsIcons.keys():
                     try:
                         media_url = f'https://eu.api.blizzard.com/data/wow/media/item/{item_id}?namespace=static-classic-eu&locale=en_GB'
@@ -4047,208 +4140,305 @@ def createExcel(guild_id, excelType):
                         icon_url = media_response.json()['assets'][0]['value']
                         itemsIcons[item_id] = icon_url
                     except:
-                        print("Error fetching media for loot item:", loot["name"])
+                        print("Error fetching media for loot item:", raidItemName)
 
                 icon_url = itemsIcons.get(item_id)
                 if icon_url:
-                # Set the cell to use the IMAGE formula
                     item_id_cell.value = f'=IMAGE("{icon_url}", 2)'
+                row[1].border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
                 row[2].alignment = Alignment(horizontal="left", vertical="center")
                 row[2].font = Font(name="Aptos", bold=True)
+                row[2].border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
                 if row[3].value is not None and row[3].value != "":
                     notes = row[3].value
                     row[3].value = '=IMAGE("https://render.worldofwarcraft.com/classic-eu/icons/56/inv_misc_questionmark.jpg", 2)'
                     row[3].comment = Comment(text=notes, author="")
                 else:
-                    classSheet.merge_cells(start_row=item_id_cell.row, start_column=3, end_row=item_id_cell.row, end_column=4)
+                    allLootSheet.merge_cells(start_row=item_id_cell.row, start_column=3, end_row=item_id_cell.row, end_column=4)
+                row[3].border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
                 row[4].alignment = Alignment(horizontal="center", vertical="center")
                 row[4].font = Font(name="Aptos", bold=True)
+                row[4].border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-                if row[4].value == "1":
+                if row[4].value == "1" or row[4].value == "S":
                     row[4].fill = PatternFill(start_color="32C3F6", end_color="32C3F6", fill_type="solid")
-                elif row[4].value == "2":
+                elif row[4].value == "2" or row[4].value == "A":
                     row[4].fill = PatternFill(start_color="20FF26", end_color="20FF26", fill_type="solid")
-                elif row[4].value == "3":
+                elif row[4].value == "3" or row[4].value == "B":
                     row[4].fill = PatternFill(start_color="F7FF26", end_color="F7FF26", fill_type="solid")
-                elif row[4].value == "4":
+                elif row[4].value == "4" or row[4].value == "C":
                     row[4].fill = PatternFill(start_color="FF734D", end_color="FF734D", fill_type="solid")
-                elif row[4].value == "5":
+                elif row[4].value == "5" or row[4].value == "D":
                     row[4].fill = PatternFill(start_color="F30026", end_color="F30026", fill_type="solid")
-                elif row[4].value == "6":
+                elif row[4].value == "6" or row[4].value == "F":
                     row[4].fill = PatternFill(start_color="CC3071", end_color="CC3071", fill_type="solid")
 
-                for col_num in range(5, len(sheetPlayer) + 5):
-                    currRow = row[col_num]
-                    currRow.alignment = Alignment(horizontal="center", vertical="center")
+                foundTheEnd = False
+                index = 8
+                while not foundTheEnd:
+                    if index >= len(row):
+                        foundTheEnd = True
+                        break
+                    cell = row[index]
+                    if cell.value is None or cell.value == "":
+                        foundTheEnd = True
+                    else:
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                        cell.font = Font(name="Aptos", bold=True)
+                        cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-                    playerName = headers[col_num]
-                    playerInfo = sheetPlayer[playerName]
-                    row[col_num].value = "-"
+                        raw_name = cell.value.split(" [A]")[0].split(" (")[0].strip()
+                        player = loot_group_players.get(raw_name.capitalize())
+                        if player:
+                            classColor = CLASS_LIST.get(player["class"], {}).get("color", "CCCCCC")
+                            cell.fill = PatternFill(start_color=classColor, end_color=classColor, fill_type="solid")
 
-                    try:
-                        playerArmory = armoryList[playerName]
-                    except KeyError:
-                        playerArmory = []
-                        armoryList[playerName] = playerArmory
-                    for armoryItem in armoryList[playerName]:
-                        found = False
-                        if armoryItem == row[2].value:
-                            found = True
-                        elif row[2].value == "Head of Nefarian":
-                            if armoryItem == "Master Dragonslayer's Medallion" or armoryItem == "Master Dragonslayer's Orb" or armoryItem == "Master Dragonslayer's Ring":
-                                found = True
-                        if found:
-                            row[col_num].value = "Equipped"
-                            row[col_num].fill = PatternFill(start_color="A1FB8E", end_color="A1FB8E", fill_type="solid")
-                            break
+                    index += 1
+                    if index >= len(row):
+                        foundTheEnd = True
 
-                    for loot in playerInfo["loot"].values():
-                        if loot["name"] == row[2].value:
-                            row[col_num].value = "LC " + loot["receivedDate"]
-                            row[col_num].fill = PatternFill(start_color="75F94D", end_color="75F94D", fill_type="solid")
-                            break
-                    
-                    # Find the current item's details
-                    current_item = next((item for item in classItems if item["itemId"] == item_id), None)
-                    if current_item:
-                        playerRole = playerInfo.get("role", "")
-                        itemOffNotes = current_item.get("itemOffNotes", "")
-                        
-                        # Parse itemOffNotes to extract classes and roles
-                        raidItemClasses = []
-                        raidItemRoles = []
+            for column in allLootSheet.columns:
+                column_letter = get_column_letter(column[0].column)
+                column_size = 30
+                if column_letter == "B" or column_letter == "D" or column_letter == "E":
+                    column_size = 4.5
+                elif column_letter == "A":
+                    column_size = 4
+                elif column_letter == "C":
+                    column_size = 45
+                allLootSheet.column_dimensions[column_letter].width = column_size
 
-                        # Extract classes from < >
-                        class_matches = re.findall(r'<([^>]+)>', itemOffNotes)
-                        for match in class_matches:
-                            raidItemClasses.append(match.strip())
+    if excelType == "Class Items" or excelType == "All" :
+        ROLE_SHEET_DEFS = [
+            {"key": "Tank",    "label": "Tanks",   "color": "7B6941"},
+            {"key": "DPS",     "label": "DPS",     "color": "9B2335"},
+            {"key": "Caster",  "label": "Casters", "color": "2255A4"},
+            {"key": "Healers", "label": "Healers", "color": "2E7D32"},
+        ]
 
-                        # Extract roles from [ ]
-                        role_matches = re.findall(r'\[([^\]]+)\]', itemOffNotes)
-                        for match in role_matches:
-                            raidItemRoles.append(match.strip())
-                        
-                        wow_class_info = CLASS_LIST.get(wowClass, {})
+        role_raid_groups = sorted(set(p.get("raid_group_name", "Unknown") for p in players.values()))
+        if not role_raid_groups:
+            role_raid_groups = ["Unknown"]
 
-                        # Simplified filtering logic
-                        can_use_item = False
+        # Pre-compute items for each role using all players across all raid groups
+        role_items_cache = {}
+        for role_def in ROLE_SHEET_DEFS:
+            role_key = role_def["key"]
+            role_players_global = [p for p in players.values() if get_character_role_sheet(p) == role_key]
+            role_items_cache[role_key] = [
+                item for item in itemList.values()
+                if any(character_can_use_item(p, item["itemOffNotes"]) for p in role_players_global)
+            ]
+            print(f"Role {role_key} has {len(role_items_cache[role_key])} items.")
 
-                        if raidItemClasses and not raidItemRoles:
-                            # Only classes specified - filter by class
-                            can_use_item = wowClass in raidItemClasses
+        for role_def in ROLE_SHEET_DEFS:
+            role_key   = role_def["key"]
+            role_label = role_def["label"]
+            role_color = role_def["color"]
+            role_items = role_items_cache[role_key]
 
-                        elif raidItemRoles and not raidItemClasses:
-                            # Only roles specified - filter by role
-                            can_use_item = playerRole in raidItemRoles
-
-                        elif raidItemClasses and raidItemRoles:
-                            # Both classes and roles specified - filter by roles + class compatibility
-                            class_match = wowClass in raidItemClasses
-                            wow_class_roles = wow_class_info.get("roles", [])
-                            role_match = playerRole in raidItemRoles
-
-                            if class_match and role_match:
-                                can_use_item = True
-                            elif class_match:
-                                # Only class match - check if no raid item roles are shared with current class
-                                wow_class_roles = wow_class_info.get("roles", [])
-                                shared_roles = any(role in wow_class_roles for role in raidItemRoles)
-                                can_use_item = not shared_roles
-                            elif role_match:
-                                # Only role match - check if no raid item classes share the role with player
-                                shared_class_role = False
-                                for raid_class in raidItemClasses:
-                                    raid_class_info = CLASS_LIST.get(raid_class, {})
-                                    raid_class_roles = raid_class_info.get("roles", [])
-                                    if player_role in raid_class_roles:
-                                        shared_class_role = True
-                                    break
-                                # Check if this player's role makes the item OS
-                                can_use_item = not shared_class_role                        
-                            
-                        if not can_use_item:
-                            row[col_num].value = "OS"
-                            row[col_num].fill = PatternFill(start_color="9DC0FA", end_color="9DC0FA", fill_type="solid")
-
-            # Remove rows where all players only have "OS" values
-            rows_to_remove = []
-            
-            for row_idx in range(2, classSheet.max_row + 1):  # Start from row 2 (after header)
-                # Check if this row has an item (has an item ID)
-                item_id_cell = classSheet.cell(row=row_idx, column=2)
-                if item_id_cell.value is None or item_id_cell.value == "":
-                    continue  # Skip non-item rows
-                
-                # Check all player columns for this item
-                all_os_or_empty = True
-                has_any_value = False
-                
-                for col_num in range(6, len(sheetPlayer) + 6):  # Player columns start at column 6
-                    cell_value = classSheet.cell(row=row_idx, column=col_num).value
-                    
-                    if cell_value and cell_value != "-":
-                        has_any_value = True
-                        if cell_value != "OS":
-                            all_os_or_empty = False
-                            break
-                
-                # If the row has values and they're all "OS", mark it for removal
-                if has_any_value and all_os_or_empty:
-                    rows_to_remove.append(row_idx)
-                    item_name = classSheet.cell(row=row_idx, column=3).value
-                    print(f"Removing item '{item_name}' from {wowClass} - all players have OS only")
-
-            # Remove rows in reverse order to avoid index shifting issues
-            for row_idx in reversed(rows_to_remove):
-                classSheet.delete_rows(row_idx, 1)
-
-            if rows_to_remove:
-                print(f"Removed {len(rows_to_remove)} OS-only items from {wowClass} sheet")
-                # Update totalRows after removing rows
-                totalRows = totalRows - len(rows_to_remove)
-
-            for col_num in range(1, len(sheetPlayer) + 7):
-                finalCell = classSheet.cell(row=totalRows, column=col_num)
-                finalCell.fill = PatternFill(start_color=classBgColor, end_color=classBgColor, fill_type="solid")
-
-
-            # Define your data area
-            min_row = 1
-            max_row = classSheet.max_row
-            min_col = 1
-            max_col = classSheet.max_column
-
-            thick = Side(border_style="thick", color="000000")
-            thin = Side(border_style="thin", color="000000")
-
-            for row in range(min_row, max_row + 1):
-                for col in range(min_col, max_col + 1):
-                    cell = classSheet.cell(row=row, column=col)
-
-                    left_border = col == min_col + 1 and row > min_row and row < max_row
-                    right_border = col == max_col - 1 and row > min_row and row < max_row
-                    top_border = row == min_row + 1 and col > min_col and col < max_col
-                    bottom_border = row == max_row - 1 and col > min_col and col < max_col
-
-                    if row > min_row and row < max_row and col > min_col and col < max_col:
-                        cell.border = Border(thin, thin, thin, thin)
-                    
-                    b = cell.border
-                    border = Border(
-                        left=thick if (col == min_col or left_border) else b.left,
-                        right=thick if (col == max_col or right_border) else b.right,
-                        top=thick if (row == min_row or top_border) else b.top,
-                        bottom=thick if (row == max_row or bottom_border) else b.bottom,
-                    )
-                    cell.border = border
-
-            if not hasValues:
-                print(f"No items found for class {wowClass}. Skipping sheet creation.")
-                workbook.remove(classSheet)
+            if not role_items:
                 continue
+
+            for rg_name in role_raid_groups:
+                sheet_players = {
+                    name: p for name, p in players.items()
+                    if p.get("raid_group_name") == rg_name and get_character_role_sheet(p) == role_key
+                }
+                if not sheet_players:
+                    continue
+
+                sheet_title = f"{rg_name} {role_label}"
+                if len(sheet_title) > 31:
+                    sheet_title = sheet_title[:31]
+                roleSheet = workbook.create_sheet(title=sheet_title)
+
+                headers = [" ", " ", " ", " ", " "]
+                for player in sheet_players.values():
+                    headers.append(player["name"].capitalize())
+                headers.append(" ")
+
+                for col_num, header in enumerate(headers, start=1):
+                    thin = Side(border_style="thin", color="000000")
+                    column_letter = get_column_letter(col_num)
+                    cell = roleSheet.cell(row=1, column=col_num, value=header)
+                    cell.fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
+                    if cell.value != " ":
+                        cell.border = Border(thin, thin, thin, thin)
+                    cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+
+                    column_size = 16
+                    if col_num == 1:
+                        column_size = 4
+                    elif col_num == 2:
+                        column_size = 4.5
+                    elif col_num == 3:
+                        column_size = 45
+                    elif col_num == 4:
+                        column_size = 5
+                    elif col_num == 5:
+                        column_size = 5
+                    elif col_num == len(sheet_players) + 6:
+                        column_size = 4
+                    roleSheet.column_dimensions[column_letter].width = column_size
+
+                totalRows = len(role_items) + 2
+                for item in role_items:
+                    itemData = ["", item["itemId"], item["itemName"], item["itemNotes"], item["tier_label"]]
+                    roleSheet.append(itemData)
+
+                for row in roleSheet.iter_rows(min_row=2, max_row=roleSheet.max_row):
+                    row[0].fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
+                    row[len(sheet_players) + 5].fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
+                    item_id_cell = row[1]
+                    item_id = str(item_id_cell.value)
+
+                    roleSheet.row_dimensions[item_id_cell.row].height = iconHeight
+
+                    if item_id is None or item_id == "":
+                        current_row = item_id_cell.row
+                        roleSheet.merge_cells(start_row=current_row, start_column=3, end_row=current_row, end_column=len(sheet_players) + 5)
+                        row[2].alignment = Alignment(horizontal="left", vertical="top")
+                        row[2].font = Font(name="Aptos", bold=False)
+                        row[2].fill = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid")
+                        continue
+
+                    current_item = next((it for it in role_items if it["itemId"] == item_id), None)
+
+                    if item_id not in itemsIcons.keys():
+                        try:
+                            media_url = f'https://eu.api.blizzard.com/data/wow/media/item/{item_id}?namespace=static-classic-eu&locale=en_GB'
+                            urlHeaders = {'Authorization': f'Bearer {access_token}'}
+                            media_response = requests.get(media_url, headers=urlHeaders)
+                            icon_url = media_response.json()['assets'][0]['value']
+                            itemsIcons[item_id] = icon_url
+                        except:
+                            print(f"Error fetching media for item {item_id}")
+
+                    icon_url = itemsIcons.get(item_id)
+                    if icon_url:
+                        item_id_cell.value = f'=IMAGE("{icon_url}", 2)'
+
+                    row[2].alignment = Alignment(horizontal="left", vertical="center")
+                    row[2].font = Font(name="Aptos", bold=True)
+
+                    if row[3].value is not None and row[3].value != "":
+                        notes = row[3].value
+                        row[3].value = '=IMAGE("https://render.worldofwarcraft.com/classic-eu/icons/56/inv_misc_questionmark.jpg", 2)'
+                        row[3].comment = Comment(text=notes, author="")
+                    else:
+                        roleSheet.merge_cells(start_row=item_id_cell.row, start_column=3, end_row=item_id_cell.row, end_column=4)
+
+                    row[4].alignment = Alignment(horizontal="center", vertical="center")
+                    row[4].font = Font(name="Aptos", bold=True)
+
+                    if row[4].value == "1" or row[4].value == "S":
+                        row[4].fill = PatternFill(start_color="32C3F6", end_color="32C3F6", fill_type="solid")
+                    elif row[4].value == "2" or row[4].value == "A":
+                        row[4].fill = PatternFill(start_color="20FF26", end_color="20FF26", fill_type="solid")
+                    elif row[4].value == "3" or row[4].value == "B":
+                        row[4].fill = PatternFill(start_color="F7FF26", end_color="F7FF26", fill_type="solid")
+                    elif row[4].value == "4" or row[4].value == "C":
+                        row[4].fill = PatternFill(start_color="FF734D", end_color="FF734D", fill_type="solid")
+                    elif row[4].value == "5" or row[4].value == "D":
+                        row[4].fill = PatternFill(start_color="F30026", end_color="F30026", fill_type="solid")
+                    elif row[4].value == "6" or row[4].value == "F":
+                        row[4].fill = PatternFill(start_color="CC3071", end_color="CC3071", fill_type="solid")
+
+                    actual_item_name = current_item["itemName"] if current_item else ""
+
+                    for col_idx, (pname, playerInfo) in enumerate(sheet_players.items(), start=5):
+                        currCell = row[col_idx]
+                        currCell.alignment = Alignment(horizontal="center", vertical="center")
+                        currCell.value = "-"
+
+                        try:
+                            playerArmory = armoryList[pname]
+                        except KeyError:
+                            playerArmory = []
+                            armoryList[pname] = playerArmory
+
+                        for armoryItem in armoryList[pname]:
+                            found = False
+                            if armoryItem == actual_item_name:
+                                found = True
+                            elif actual_item_name == "Head of Nefarian":
+                                if armoryItem in ("Master Dragonslayer's Medallion", "Master Dragonslayer's Orb", "Master Dragonslayer's Ring"):
+                                    found = True
+                            if found:
+                                currCell.value = "Equipped"
+                                currCell.fill = PatternFill(start_color="A1FB8E", end_color="A1FB8E", fill_type="solid")
+                                break
+
+                        for loot in playerInfo["loot"].values():
+                            if loot["name"] == actual_item_name:
+                                alt_tag = " [A]" if playerInfo.get("is_alt") else ""
+                                currCell.value = f"LC {loot['receivedDate']}{alt_tag}"
+                                currCell.fill = PatternFill(start_color="75F94D", end_color="75F94D", fill_type="solid")
+                                break
+
+                        if current_item and not character_can_use_item(playerInfo, current_item["itemOffNotes"]):
+                            if currCell.value == "-":
+                                currCell.value = "OS"
+                                currCell.fill = PatternFill(start_color="9DC0FA", end_color="9DC0FA", fill_type="solid")
+
+                rows_to_remove = []
+                for row_idx in range(2, roleSheet.max_row + 1):
+                    item_id_check = roleSheet.cell(row=row_idx, column=2)
+                    if item_id_check.value is None or item_id_check.value == "":
+                        continue
+                    all_os_or_empty = True
+                    has_any_value = False
+                    for col_num in range(6, len(sheet_players) + 6):
+                        cell_value = roleSheet.cell(row=row_idx, column=col_num).value
+                        if cell_value and cell_value != "-":
+                            has_any_value = True
+                            if cell_value != "OS":
+                                all_os_or_empty = False
+                                break
+                    if has_any_value and all_os_or_empty:
+                        rows_to_remove.append(row_idx)
+                        item_name_check = roleSheet.cell(row=row_idx, column=3).value
+                        print(f"Removing '{item_name_check}' from {sheet_title} — all players OS")
+
+                for row_idx in reversed(rows_to_remove):
+                    roleSheet.delete_rows(row_idx, 1)
+                if rows_to_remove:
+                    totalRows -= len(rows_to_remove)
+
+                for col_num in range(1, len(sheet_players) + 7):
+                    finalCell = roleSheet.cell(row=totalRows, column=col_num)
+                    finalCell.fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
+
+                min_row = 1
+                max_row = roleSheet.max_row
+                min_col = 1
+                max_col = roleSheet.max_column
+                thick = Side(border_style="thick", color="000000")
+                thin  = Side(border_style="thin",  color="000000")
+
+                for row_num in range(min_row, max_row + 1):
+                    for col_num in range(min_col, max_col + 1):
+                        cell = roleSheet.cell(row=row_num, column=col_num)
+                        left_border   = col_num == min_col + 1 and row_num > min_row and row_num < max_row
+                        right_border  = col_num == max_col - 1 and row_num > min_row and row_num < max_row
+                        top_border    = row_num == min_row + 1 and col_num > min_col and col_num < max_col
+                        bottom_border = row_num == max_row - 1 and col_num > min_col and col_num < max_col
+                        if row_num > min_row and row_num < max_row and col_num > min_col and col_num < max_col:
+                            cell.border = Border(thin, thin, thin, thin)
+                        b = cell.border
+                        border = Border(
+                            left=thick   if (col_num == min_col or left_border)   else b.left,
+                            right=thick  if (col_num == max_col or right_border)  else b.right,
+                            top=thick    if (row_num == min_row or top_border)    else b.top,
+                            bottom=thick if (row_num == max_row or bottom_border) else b.bottom,
+                        )
+                        cell.border = border
+
     # Item Sheets Finish
 
     #Save cache item icons
