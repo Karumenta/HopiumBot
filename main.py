@@ -3837,7 +3837,9 @@ def createExcel(guild_id, excelType):
 
             target_sheet.column_dimensions[column_letter].width = max(len(column_name), size)
 
-            for row in range(2, 80):
+            # Keep formatting past current data while guaranteeing at least 200 rows.
+            max_formatted_row = max(data_row_count + 1, 200)
+            for row in range(2, max_formatted_row + 1):
                 cell = target_sheet[column_letter + str(row)]
                 if cell.value is not None:
                     cell.alignment = Alignment(horizontal="center")
