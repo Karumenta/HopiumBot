@@ -3417,7 +3417,7 @@ def createExcel(guild_id, excelType):
             player["isInAttendance"] = True
             players[playerName] = player
 
-        attendanceDates.sort(key=lambda d: datetime.strptime(d, "%d/%m/%y"))
+        attendanceDates.sort(key=lambda d: datetime.strptime(d, "%d/%m/%y"), reverse=True)
     #Attendance Finish
     
     #Loot Start
