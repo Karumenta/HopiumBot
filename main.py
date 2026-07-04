@@ -3453,7 +3453,7 @@ def createExcel(guild_id, excelType):
             lootItem["id"] = lootReceived["item_id"]
             lootItem["isOS"] = lootReceived["pivot"]["is_offspec"]
             
-            date_object = datetime.strptime(lootReceived["pivot"]["received_at"], "%Y-%m-%d %H:%M:%S")
+            date_object = datetime.strptime(lootReceived["pivot"]["received_at"], "%Y-%m-%d %H:%M:%S") + timedelta(hours=2)
             formatted_date = date_object.strftime("%d/%m/%y")
             lootItem["receivedDate"] = formatted_date
             loot[lootItem["name"]] = lootItem
@@ -3965,22 +3965,22 @@ def createExcel(guild_id, excelType):
                         elif base_value == "Holiday":
                             bgcolor = "00FFFF"
                         elif base_value == "-":
-                            if "Split 1" in raid_note:
+                            if "S1" in raid_note:
                                 if raid_group_name == "Speed Run":
                                     bgcolor = "8BEFA8"
                                 else:
                                     bgcolor = "FFD98A"
-                            elif "Split 2" in raid_note:
+                            elif "S2" in raid_note:
                                 bgcolor = "7FD1FF"
                             else:
                                 bgcolor = "A1FB8E"
                         else:
-                            if "Split 1" in raid_note:
+                            if "S1" in raid_note:
                                 if raid_group_name == "Speed Run":
                                     bgcolor = "72E89A"
                                 else:
                                     bgcolor = "F7CA6A"
-                            elif "Split 2" in raid_note:
+                            elif "S2" in raid_note:
                                 bgcolor = "69C4F7"
                             else:
                                 bgcolor = "75F94D"
@@ -4236,6 +4236,11 @@ def createExcel(guild_id, excelType):
             ]
             print(f"Role {role_key} has {len(role_items_cache[role_key])} items.")
 
+        roleSheet = workbook.create_sheet(title="Class Items")
+        thin = Side(border_style="thin", color="000000")
+        thick = Side(border_style="thick", color="000000")
+        current_section_row = 1
+
         for role_def in ROLE_SHEET_DEFS:
             role_key   = role_def["key"]
             role_label = role_def["label"]
@@ -4245,73 +4250,120 @@ def createExcel(guild_id, excelType):
             if not role_items:
                 continue
 
+            role_groups = []
             for rg_name in role_raid_groups:
-                sheet_players = {
+                group_players = {
                     name: p for name, p in players.items()
                     if p.get("raid_group_name") == rg_name and get_character_role_sheet(p) == role_key
                 }
-                if not sheet_players:
-                    continue
+                if group_players:
+                    role_groups.append({"group_name": rg_name, "players": group_players})
 
-                sheet_title = f"{rg_name} {role_label}"
-                if len(sheet_title) > 31:
-                    sheet_title = sheet_title[:31]
-                roleSheet = workbook.create_sheet(title=sheet_title)
+            if not role_groups:
+                continue
 
-                headers = [" ", " ", " ", " ", " "]
-                for player in sheet_players.values():
-                    headers.append(player["name"].capitalize())
-                headers.append(" ")
+            role_max_players = max(len(group["players"]) for group in role_groups)
+            role_max_col = 6 + role_max_players
 
-                for col_num, header in enumerate(headers, start=1):
-                    thin = Side(border_style="thin", color="000000")
-                    column_letter = get_column_letter(col_num)
-                    cell = roleSheet.cell(row=1, column=col_num, value=header)
+            role_title_row = current_section_row
+            roleSheet.merge_cells(
+                start_row=role_title_row,
+                start_column=1,
+                end_row=role_title_row,
+                end_column=role_max_col,
+            )
+            role_title_cell = roleSheet.cell(row=role_title_row, column=1, value=f"{role_label}")
+            role_title_cell.fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
+            role_title_cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
+            role_title_cell.alignment = Alignment(horizontal="left", vertical="center")
+
+            group_start_row = role_title_row + 1
+
+            for group in role_groups:
+                group_name = group["group_name"]
+                group_players = group["players"]
+                sorted_group_players = sorted(
+                    group_players.items(),
+                    key=lambda kv: str(kv[1].get("name", kv[0])).casefold(),
+                )
+
+                start_col = 1
+                item_id_col = 2
+                item_name_col = 3
+                item_notes_col = 4
+                tier_col = 5
+                player_start_col = 6
+                player_end_actual = player_start_col + len(group_players) - 1
+                player_end_col = player_start_col + role_max_players - 1
+                end_col = player_end_col + 1
+
+                group_header_row = group_start_row
+                header_row = group_start_row + 1
+                data_start_row = group_start_row + 2
+                data_end_row = data_start_row + len(role_items) - 1
+
+                for col_num in range(start_col, end_col + 1):
+                    top_cell = roleSheet.cell(row=group_header_row, column=col_num, value="")
+                    top_cell.fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
+                    top_cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
+                    top_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+                if player_start_col <= player_end_col:
+                    roleSheet.merge_cells(
+                        start_row=group_header_row,
+                        start_column=player_start_col,
+                        end_row=group_header_row,
+                        end_column=player_end_col,
+                    )
+                    group_title_cell = roleSheet.cell(row=group_header_row, column=player_start_col, value=group_name)
+                    group_title_cell.fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
+                    group_title_cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
+                    group_title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+                header_map = {
+                    start_col: " ",
+                    item_id_col: " ",
+                    item_name_col: "Item",
+                    item_notes_col: "Note",
+                    tier_col: "Tier",
+                    end_col: " ",
+                }
+
+                group_players_values = [player_info for _, player_info in sorted_group_players]
+                for col_num in range(player_start_col, player_end_col + 1):
+                    if col_num <= player_end_actual:
+                        player_name = group_players_values[col_num - player_start_col]["name"].capitalize()
+                    else:
+                        player_name = " "
+                    header_map[col_num] = player_name
+
+                for col_num, header in header_map.items():
+                    cell = roleSheet.cell(row=header_row, column=col_num, value=header)
                     cell.fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
-                    if cell.value != " ":
-                        cell.border = Border(thin, thin, thin, thin)
                     cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
                     cell.alignment = Alignment(horizontal="center", vertical="center")
+                    if header != " ":
+                        cell.border = Border(thin, thin, thin, thin)
 
+                    column_letter = get_column_letter(col_num)
                     column_size = 16
-                    if col_num == 1:
+                    if col_num == start_col:
                         column_size = 4
-                    elif col_num == 2:
+                    elif col_num == item_id_col:
                         column_size = 4.5
-                    elif col_num == 3:
+                    elif col_num == item_name_col:
                         column_size = 45
-                    elif col_num == 4:
+                    elif col_num == item_notes_col:
                         column_size = 5
-                    elif col_num == 5:
+                    elif col_num == tier_col:
                         column_size = 5
-                    elif col_num == len(sheet_players) + 6:
-                        column_size = 4
                     roleSheet.column_dimensions[column_letter].width = column_size
 
-                totalRows = len(role_items) + 2
-                for item in role_items:
-                    itemData = ["", item["itemId"], item["itemName"], item["itemNotes"], item["tier_label"]]
-                    roleSheet.append(itemData)
+                for row_offset, item in enumerate(role_items):
+                    row_idx = data_start_row + row_offset
+                    item_id = str(item["itemId"])
 
-                for row in roleSheet.iter_rows(min_row=2, max_row=roleSheet.max_row):
-                    row[0].fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
-                    row[len(sheet_players) + 5].fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
-                    item_id_cell = row[1]
-                    item_id = str(item_id_cell.value)
-
-                    roleSheet.row_dimensions[item_id_cell.row].height = iconHeight
-
-                    if item_id is None or item_id == "":
-                        current_row = item_id_cell.row
-                        roleSheet.merge_cells(start_row=current_row, start_column=3, end_row=current_row, end_column=len(sheet_players) + 5)
-                        row[2].alignment = Alignment(horizontal="left", vertical="top")
-                        row[2].font = Font(name="Aptos", bold=False)
-                        row[2].fill = PatternFill(start_color="FDE9D9", end_color="FDE9D9", fill_type="solid")
-                        continue
-
-                    current_item = next((it for it in role_items if it["itemId"] == item_id), None)
-
-                    if item_id not in itemsIcons.keys():
+                    if item_id and item_id not in itemsIcons.keys():
                         try:
                             media_url = f'https://eu.api.blizzard.com/data/wow/media/item/{item_id}?namespace=static-classic-eu&locale=en_GB'
                             urlHeaders = {'Authorization': f'Bearer {access_token}'}
@@ -4322,39 +4374,54 @@ def createExcel(guild_id, excelType):
                             print(f"Error fetching media for item {item_id}")
 
                     icon_url = itemsIcons.get(item_id)
+
+                    roleSheet.row_dimensions[row_idx].height = iconHeight
+
+                    roleSheet.cell(row=row_idx, column=start_col, value="").fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
+                    roleSheet.cell(row=row_idx, column=end_col, value="").fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
+
+                    item_id_cell = roleSheet.cell(row=row_idx, column=item_id_col)
                     if icon_url:
                         item_id_cell.value = f'=IMAGE("{icon_url}", 2)'
-
-                    row[2].alignment = Alignment(horizontal="left", vertical="center")
-                    row[2].font = Font(name="Aptos", bold=True)
-
-                    if row[3].value is not None and row[3].value != "":
-                        notes = row[3].value
-                        row[3].value = '=IMAGE("https://render.worldofwarcraft.com/classic-eu/icons/56/inv_misc_questionmark.jpg", 2)'
-                        row[3].comment = Comment(text=notes, author="")
                     else:
-                        roleSheet.merge_cells(start_row=item_id_cell.row, start_column=3, end_row=item_id_cell.row, end_column=4)
+                        item_id_cell.value = item_id
 
-                    row[4].alignment = Alignment(horizontal="center", vertical="center")
-                    row[4].font = Font(name="Aptos", bold=True)
+                    item_name_cell = roleSheet.cell(row=row_idx, column=item_name_col, value=item["itemName"])
+                    item_name_cell.alignment = Alignment(horizontal="left", vertical="center")
+                    item_name_cell.font = Font(name="Aptos", bold=True)
 
-                    if row[4].value == "1" or row[4].value == "S":
-                        row[4].fill = PatternFill(start_color="32C3F6", end_color="32C3F6", fill_type="solid")
-                    elif row[4].value == "2" or row[4].value == "A":
-                        row[4].fill = PatternFill(start_color="20FF26", end_color="20FF26", fill_type="solid")
-                    elif row[4].value == "3" or row[4].value == "B":
-                        row[4].fill = PatternFill(start_color="F7FF26", end_color="F7FF26", fill_type="solid")
-                    elif row[4].value == "4" or row[4].value == "C":
-                        row[4].fill = PatternFill(start_color="FF734D", end_color="FF734D", fill_type="solid")
-                    elif row[4].value == "5" or row[4].value == "D":
-                        row[4].fill = PatternFill(start_color="F30026", end_color="F30026", fill_type="solid")
-                    elif row[4].value == "6" or row[4].value == "F":
-                        row[4].fill = PatternFill(start_color="CC3071", end_color="CC3071", fill_type="solid")
+                    note_cell = roleSheet.cell(row=row_idx, column=item_notes_col, value=item["itemNotes"])
+                    if note_cell.value is not None and note_cell.value != "":
+                        notes = note_cell.value
+                        note_cell.value = '=IMAGE("https://render.worldofwarcraft.com/classic-eu/icons/56/inv_misc_questionmark.jpg", 2)'
+                        note_cell.comment = Comment(text=notes, author="")
+                    else:
+                        roleSheet.merge_cells(
+                            start_row=row_idx,
+                            start_column=item_name_col,
+                            end_row=row_idx,
+                            end_column=item_notes_col,
+                        )
 
-                    actual_item_name = current_item["itemName"] if current_item else ""
+                    tier_cell = roleSheet.cell(row=row_idx, column=tier_col, value=item["tier_label"])
+                    tier_cell.alignment = Alignment(horizontal="center", vertical="center")
+                    tier_cell.font = Font(name="Aptos", bold=True)
 
-                    for col_idx, (pname, playerInfo) in enumerate(sheet_players.items(), start=5):
-                        currCell = row[col_idx]
+                    if tier_cell.value == "1" or tier_cell.value == "S":
+                        tier_cell.fill = PatternFill(start_color="32C3F6", end_color="32C3F6", fill_type="solid")
+                    elif tier_cell.value == "2" or tier_cell.value == "A":
+                        tier_cell.fill = PatternFill(start_color="20FF26", end_color="20FF26", fill_type="solid")
+                    elif tier_cell.value == "3" or tier_cell.value == "B":
+                        tier_cell.fill = PatternFill(start_color="F7FF26", end_color="F7FF26", fill_type="solid")
+                    elif tier_cell.value == "4" or tier_cell.value == "C":
+                        tier_cell.fill = PatternFill(start_color="FF734D", end_color="FF734D", fill_type="solid")
+                    elif tier_cell.value == "5" or tier_cell.value == "D":
+                        tier_cell.fill = PatternFill(start_color="F30026", end_color="F30026", fill_type="solid")
+                    elif tier_cell.value == "6" or tier_cell.value == "F":
+                        tier_cell.fill = PatternFill(start_color="CC3071", end_color="CC3071", fill_type="solid")
+
+                    for col_idx, (pname, playerInfo) in enumerate(sorted_group_players, start=player_start_col):
+                        currCell = roleSheet.cell(row=row_idx, column=col_idx)
                         currCell.alignment = Alignment(horizontal="center", vertical="center")
                         currCell.value = "-"
 
@@ -4366,9 +4433,9 @@ def createExcel(guild_id, excelType):
 
                         for armoryItem in armoryList[pname]:
                             found = False
-                            if armoryItem == actual_item_name:
+                            if armoryItem == item["itemName"]:
                                 found = True
-                            elif actual_item_name == "Head of Nefarian":
+                            elif item["itemName"] == "Head of Nefarian":
                                 if armoryItem in ("Master Dragonslayer's Medallion", "Master Dragonslayer's Orb", "Master Dragonslayer's Ring"):
                                     found = True
                             if found:
@@ -4377,69 +4444,76 @@ def createExcel(guild_id, excelType):
                                 break
 
                         for loot in playerInfo["loot"].values():
-                            if loot["name"] == actual_item_name:
+                            if loot["name"] == item["itemName"]:
                                 alt_tag = " [A]" if playerInfo.get("is_alt") else ""
                                 currCell.value = f"LC {loot['receivedDate']}{alt_tag}"
                                 currCell.fill = PatternFill(start_color="75F94D", end_color="75F94D", fill_type="solid")
                                 break
 
-                        if current_item and not character_can_use_item(playerInfo, current_item["itemOffNotes"]):
+                        if not character_can_use_item(playerInfo, item["itemOffNotes"]):
                             if currCell.value == "-":
                                 currCell.value = "OS"
                                 currCell.fill = PatternFill(start_color="9DC0FA", end_color="9DC0FA", fill_type="solid")
 
+                    # Keep table width consistent for groups with fewer players
+                    for col_num in range(player_end_actual + 1, player_end_col + 1):
+                        trailing_cell = roleSheet.cell(row=row_idx, column=col_num)
+                        trailing_cell.alignment = Alignment(horizontal="center", vertical="center")
+                        trailing_cell.value = ""
+
+                    # Add full borders for the item row from icon to last real player column.
+                    for col_num in range(item_id_col, player_end_actual + 1):
+                        bordered_cell = roleSheet.cell(row=row_idx, column=col_num)
+                        bordered_cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
                 rows_to_remove = []
-                for row_idx in range(2, roleSheet.max_row + 1):
-                    item_id_check = roleSheet.cell(row=row_idx, column=2)
-                    if item_id_check.value is None or item_id_check.value == "":
+                for row_idx in range(data_start_row, data_end_row + 1):
+                    item_id_check = roleSheet.cell(row=row_idx, column=item_id_col).value
+                    if item_id_check is None or item_id_check == "":
                         continue
-                    all_os_or_empty = True
-                    has_any_value = False
-                    for col_num in range(6, len(sheet_players) + 6):
+
+                    all_os = True
+                    for col_num in range(player_start_col, player_end_actual + 1):
                         cell_value = roleSheet.cell(row=row_idx, column=col_num).value
-                        if cell_value and cell_value != "-":
-                            has_any_value = True
-                            if cell_value != "OS":
-                                all_os_or_empty = False
-                                break
-                    if has_any_value and all_os_or_empty:
+                        if cell_value != "OS":
+                            all_os = False
+                            break
+
+                    if all_os:
                         rows_to_remove.append(row_idx)
-                        item_name_check = roleSheet.cell(row=row_idx, column=3).value
-                        print(f"Removing '{item_name_check}' from {sheet_title} — all players OS")
+                        item_name_check = roleSheet.cell(row=row_idx, column=item_name_col).value
+                        print(f"Removing '{item_name_check}' from Class Items ({role_label}/{group_name}) — all players OS")
 
                 for row_idx in reversed(rows_to_remove):
                     roleSheet.delete_rows(row_idx, 1)
-                if rows_to_remove:
-                    totalRows -= len(rows_to_remove)
 
-                for col_num in range(1, len(sheet_players) + 7):
-                    finalCell = roleSheet.cell(row=totalRows, column=col_num)
+                data_end_row -= len(rows_to_remove)
+                separator_row = data_end_row + 1
+
+                for col_num in range(start_col, end_col + 1):
+                    finalCell = roleSheet.cell(row=separator_row, column=col_num)
                     finalCell.fill = PatternFill(start_color=role_color, end_color=role_color, fill_type="solid")
 
-                min_row = 1
-                max_row = roleSheet.max_row
-                min_col = 1
-                max_col = roleSheet.max_column
-                thick = Side(border_style="thick", color="000000")
-                thin  = Side(border_style="thin",  color="000000")
+                min_row = group_header_row
+                max_row = separator_row
+                min_col = start_col
+                max_col = end_col
 
                 for row_num in range(min_row, max_row + 1):
                     for col_num in range(min_col, max_col + 1):
                         cell = roleSheet.cell(row=row_num, column=col_num)
-                        left_border   = col_num == min_col + 1 and row_num > min_row and row_num < max_row
-                        right_border  = col_num == max_col - 1 and row_num > min_row and row_num < max_row
-                        top_border    = row_num == min_row + 1 and col_num > min_col and col_num < max_col
-                        bottom_border = row_num == max_row - 1 and col_num > min_col and col_num < max_col
-                        if row_num > min_row and row_num < max_row and col_num > min_col and col_num < max_col:
-                            cell.border = Border(thin, thin, thin, thin)
                         b = cell.border
                         border = Border(
-                            left=thick   if (col_num == min_col or left_border)   else b.left,
-                            right=thick  if (col_num == max_col or right_border)  else b.right,
-                            top=thick    if (row_num == min_row or top_border)    else b.top,
-                            bottom=thick if (row_num == max_row or bottom_border) else b.bottom,
+                            left=thick if col_num == min_col else b.left,
+                            right=thick if col_num == max_col else b.right,
+                            top=thick if row_num == min_row else b.top,
+                            bottom=thick if row_num == max_row else b.bottom,
                         )
                         cell.border = border
+
+                group_start_row = separator_row + 1
+
+            current_section_row = group_start_row + 1
 
     # Item Sheets Finish
 
