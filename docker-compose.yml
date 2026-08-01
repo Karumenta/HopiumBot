@@ -1,0 +1,6 @@
+services:
+  hopiumbot:
+    build: .
+    container_name: hopiumbot
+    env_file: .env
+    restart: unless-stopped

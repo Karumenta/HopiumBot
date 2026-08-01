@@ -1,0 +1,29 @@
+# Git Commands for HopiumBot
+
+# 1. First time setup (run once)
+git init
+git config --global user.name "Your Name"
+git config --global user.email "your.email@example.com"
+
+# 2. Stage all files
+git add .
+
+# 3. Commit changes
+git commit -m "Initial commit: Discord bot with application system"
+
+# 4. Add remote repository (replace with your repo URL)
+git remote add origin https://github.com/yourusername/hopiumbot.git
+
+# 5. Push to remote
+git push -u origin main
+
+# Future updates:
+git add .
+git commit -m "Update: describe your changes"
+git push
+
+# Check status
+git status
+
+# View commit history
+git log --oneline
