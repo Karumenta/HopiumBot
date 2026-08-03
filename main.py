@@ -89,7 +89,7 @@ APPLICATION_CONFIG = {
             "What country are you from and how old are you?",
             "Please tell us a bit about yourself, who are you outside of the game?",
             "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
-            "We require a few things from every raider in the guild. To have above average performance for your class and atleast 80% raid attendance. Can you fulfill these requirements?",
+            "We expect above-average performance for your class and at least 80% raid attendance. Can you commit to that?",
             "Why did you choose to apply to <Hopium>?",
             "Can someone in <Hopium> vouch for you?",
             "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
@@ -100,7 +100,7 @@ APPLICATION_CONFIG = {
             "What country are you from and how old are you?",
             "Please tell us a bit about yourself, who are you outside of the game?",
             "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
-            "We require a few things from every raider in the guild. To have above average performance for your class and atleast 80% raid attendance. Can you fulfill these requirements?",
+            "We expect above-average performance for your class and at least 80% raid attendance. Can you commit to that?",
             "Why did you choose to apply to <Hopium>?",
             "Can someone in <Hopium> vouch for you?",
             "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
@@ -115,7 +115,7 @@ APPLICATION_CONFIG = {
             "What country are you from and how old are you?",
             "Please tell us a bit about yourself, who are you outside of the game?",
             "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
-            "We require a few things from every raider in the guild. To have above average performance for your class and atleast 80% raid attendance. Can you fulfill these requirements?",
+            "We expect above-average performance for your class and at least 80% raid attendance. Can you commit to that?",
             "Why did you choose to apply to <Hopium>?",
             "Can someone in <Hopium> vouch for you?",
             "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
@@ -132,6 +132,13 @@ OPTIONAL_QUESTIONS = {
 
 # Legacy support - will be removed after migration
 APPLICATION_QUESTIONS = APPLICATION_CONFIG["paths"]["both"]
+
+# Old DM-based application flow (Apply button -> active_applications).
+# Applications now go through the website's /application form instead, but
+# this flag lets us switch back to the DM flow without ripping the code
+# out, in case the website flow needs to be disabled temporarily.
+DM_APPLICATION_ENABLED = os.getenv('DM_APPLICATION_ENABLED', 'false').lower() == 'true'
+APPLICATION_WEBSITE_URL = os.getenv('APPLICATION_WEBSITE_URL', 'https://hopiumguild.com/application')
 
 CLASS_LIST = {
     "Druid" : {"name": "Druid", "roles": ["DPS", "Heal", "Tank"], "color": "FF7C0A"},
@@ -831,8 +838,16 @@ class ApplicationView(discord.ui.View):
     
     @discord.ui.button(label='Apply', style=discord.ButtonStyle.green, emoji='📝')
     async def apply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not DM_APPLICATION_ENABLED:
+            await interaction.response.send_message(
+                "📝 Applications are now handled on our website! Please apply here: "
+                "https://hopiumguild.com/application",
+                ephemeral=True
+            )
+            return
+
         user = interaction.user
-        
+
         # Check if user already has Trial, Raider, Officer, or Guild Leader role
         guild = interaction.guild
         member = guild.get_member(user.id)
@@ -910,6 +925,24 @@ class ApplicationView(discord.ui.View):
             await interaction.response.send_message("❌ An error occurred. Please try again later or reach someone from the Staff.", ephemeral=True)
             print(f"Error sending DM: {e}")
 
+
+def build_apply_view():
+    """View postata in #apply-here. Se il flusso DM e' disattivato (default,
+    vedi DM_APPLICATION_ENABLED) usiamo un Link Button nativo di Discord che
+    apre direttamente il form sul sito: un click, niente interazione col bot
+    di mezzo, niente testo ephemeral da leggere prima del link vero e proprio."""
+    if DM_APPLICATION_ENABLED:
+        return ApplicationView()
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(
+        label='Apply on our website',
+        style=discord.ButtonStyle.link,
+        emoji='📝',
+        url=APPLICATION_WEBSITE_URL,
+    ))
+    return view
+
+
 class ApplicationPathView(discord.ui.View):
     def __init__(self, user_id, guild_id):
         super().__init__(timeout=PATH_SELECTION_TIMEOUT)  # 20 minute timeout
@@ -978,23 +1011,49 @@ class ApplicationPathView(discord.ui.View):
         if self.user_id in active_applications:
             del active_applications[self.user_id]
 
-class ReviewView(discord.ui.View):
-    def __init__(self, user_id, character_name, application_channel, review_channel):
-        super().__init__(timeout=None)
+# Le application restano aperte a tempo indeterminato (nessun timeout), quindi
+# i bottoni Accept/Decline devono sopravvivere a un riavvio del bot. Un
+# discord.ui.View "normale" perde l'aggancio ai bottoni dopo il riavvio perche'
+# il custom_id e' generato automaticamente e lo stato (member/canali) vive solo
+# in RAM. Con DynamicItem invece lo stato necessario (user_id + id dei due
+# canali) e' codificato nel custom_id stesso, quindi al click - anche dopo un
+# restart - il bottone si "ricostruisce" da solo leggendo il custom_id, senza
+# bisogno di tenere in memoria l'istanza originale. Registrata una sola volta
+# via bot.add_dynamic_items() subito dopo le classi (vedi sotto).
+REVIEW_ACCEPT_CUSTOM_ID = r'review:accept:(?P<user_id>\d+):(?P<app_channel_id>\d+):(?P<review_channel_id>\d+)'
+REVIEW_DECLINE_CUSTOM_ID = r'review:decline:(?P<user_id>\d+):(?P<app_channel_id>\d+):(?P<review_channel_id>\d+)'
+
+
+class ReviewAcceptButton(discord.ui.DynamicItem[discord.ui.Button], template=REVIEW_ACCEPT_CUSTOM_ID):
+    def __init__(self, user_id: int, app_channel_id: int, review_channel_id: int):
+        super().__init__(
+            discord.ui.Button(
+                label='Accept',
+                style=discord.ButtonStyle.green,
+                emoji='✅',
+                custom_id=f'review:accept:{user_id}:{app_channel_id}:{review_channel_id}',
+            )
+        )
         self.user_id = user_id
-        self.character_name = character_name
-        self.application_channel = application_channel
-        self.review_channel = review_channel
-    
-    @discord.ui.button(label='Accept', style=discord.ButtonStyle.green, emoji='✅')
-    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.app_channel_id = app_channel_id
+        self.review_channel_id = review_channel_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match['user_id']), int(match['app_channel_id']), int(match['review_channel_id']))
+
+    async def callback(self, interaction: discord.Interaction):
         guild = interaction.guild
         member = guild.get_member(self.user_id)
-        
+        application_channel = guild.get_channel(self.app_channel_id)
+        review_channel = guild.get_channel(self.review_channel_id)
+
         if not member:
             await interaction.response.send_message("❌ User not found in server.", ephemeral=True)
             return
-        
+
+        character_name = member.display_name
+
         try:
             # Get or create "Trial" role
             trial_role = discord.utils.get(guild.roles, name="Trial")
@@ -1035,17 +1094,17 @@ class ReviewView(discord.ui.View):
                 print("Created 'Trials' category with Officer/Guild Leader/Bot permissions!")
             
             # Rename application channel and move to Trials category
-            if self.application_channel:
-                new_channel_name = f"trial-{self.character_name.lower().replace(' ', '-')}"
+            if application_channel:
+                new_channel_name = f"trial-{character_name.lower().replace(' ', '-')}"
                 # When moving to Trials, keep user access for the trial channel
                 trial_overwrites = {
                     guild.default_role: discord.PermissionOverwrite(read_messages=False, send_messages=False, view_channel=False),
                     member: discord.PermissionOverwrite(read_messages=True, send_messages=True, view_channel=True)
                 }
-                await self.application_channel.edit(name=new_channel_name, category=trials_category, overwrites=trial_overwrites)
-            
+                await application_channel.edit(name=new_channel_name, category=trials_category, overwrites=trial_overwrites)
+
             # Send acceptance message to application channel
-            if self.application_channel:
+            if application_channel:
                 accept_embed = discord.Embed(
                     title="🎉 Application Accepted!",
                     description=f"Congratulations {member.mention}! Your application has been accepted and you've been given the **Trial** role.",
@@ -1066,7 +1125,7 @@ class ReviewView(discord.ui.View):
                     value="Please make sure you install RCLC lootcouncil before heading into your first raid with us, we use this addon to distribute loot in our raids 🙂",
                     inline=False
                 )
-                await self.application_channel.send(embed=accept_embed)
+                await application_channel.send(embed=accept_embed)
             
             # Send confirmation message to interaction BEFORE deleting the review channel
             await interaction.response.send_message(f"✅ Application accepted! {member.mention} has been given the Trial role and the trial channel has been moved to the Trials category.", ephemeral=False)
@@ -1103,12 +1162,12 @@ class ReviewView(discord.ui.View):
             if review_all_channel:
                 confirmation_embed = discord.Embed(
                     title="✅ Application Accepted",
-                    description=f"**Staff Member:** {interaction.user.mention}\n**Applicant:** {member.mention} ({member.display_name})\n**Character Name:** {self.character_name}",
+                    description=f"**Staff Member:** {interaction.user.mention}\n**Applicant:** {member.mention} ({member.display_name})\n**Character Name:** {character_name}",
                     color=0x00ff00
                 )
                 confirmation_embed.add_field(
                     name="📁 Trial Channel",
-                    value=f"Trial channel: {self.application_channel.mention if self.application_channel else 'N/A'}",
+                    value=f"Trial channel: {application_channel.mention if application_channel else 'N/A'}",
                     inline=False
                 )
                 confirmation_embed.add_field(
@@ -1117,15 +1176,15 @@ class ReviewView(discord.ui.View):
                     inline=False
                 )
                 await review_all_channel.send(embed=confirmation_embed)
-            
+
             # Delete the review channel LAST to avoid interaction errors
-            if self.review_channel:
+            if review_channel:
                 try:
-                    await self.review_channel.delete()
-                    print(f"Deleted review channel: {self.review_channel.name}")
+                    await review_channel.delete()
+                    print(f"Deleted review channel: {review_channel.name}")
                 except Exception as delete_error:
                     print(f"Error deleting review channel: {delete_error}")
-            
+
         except Exception as e:
             try:
                 if interaction.response.is_done():
@@ -1135,28 +1194,68 @@ class ReviewView(discord.ui.View):
             except Exception:
                 # If we can't send the error message, just log it
                 print(f"Error accepting application: {e}")
-    
-    @discord.ui.button(label='Decline', style=discord.ButtonStyle.red, emoji='❌')
-    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+
+
+class ReviewDeclineButton(discord.ui.DynamicItem[discord.ui.Button], template=REVIEW_DECLINE_CUSTOM_ID):
+    def __init__(self, user_id: int, app_channel_id: int, review_channel_id: int):
+        super().__init__(
+            discord.ui.Button(
+                label='Decline',
+                style=discord.ButtonStyle.red,
+                emoji='❌',
+                custom_id=f'review:decline:{user_id}:{app_channel_id}:{review_channel_id}',
+            )
+        )
+        self.user_id = user_id
+        self.app_channel_id = app_channel_id
+        self.review_channel_id = review_channel_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match['user_id']), int(match['app_channel_id']), int(match['review_channel_id']))
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        member = guild.get_member(self.user_id)
+        application_channel = guild.get_channel(self.app_channel_id)
+        review_channel = guild.get_channel(self.review_channel_id)
+        character_name = member.display_name if member else "applicant"
+
         try:
             # Send decline message to application channel before deletion
-            if self.application_channel:
+            if application_channel:
                 decline_embed = discord.Embed(
                     title="❌ Application Declined",
-                    description=f"Unfortunately {self.character_name}, your application has been declined. You may reapply in the future.",
+                    description=f"Unfortunately {character_name}, your application has been declined. You may reapply in the future.",
                     color=0xff0000
                 )
-                await self.application_channel.send(embed=decline_embed)
-            
+                await application_channel.send(embed=decline_embed)
+
             await interaction.response.send_message("❌ Application declined. Review channel will be deleted.", ephemeral=False)
-            
+
             # Delete the review channel
-            if self.review_channel:
-                await self.review_channel.delete()
-            
+            if review_channel:
+                await review_channel.delete()
+
         except Exception as e:
             await interaction.response.send_message(f"❌ Error processing decline: {e}", ephemeral=True)
             print(f"Error declining application: {e}")
+
+
+class ReviewView(discord.ui.View):
+    """Wrapper leggero attorno ai due DynamicItem - serve solo per mandare
+    il messaggio iniziale con entrambi i bottoni, tutto lo stato che serve
+    dopo un restart vive nel custom_id dei bottoni stessi, non qui."""
+    def __init__(self, user_id: int, application_channel_id: int, review_channel_id: int):
+        super().__init__(timeout=None)
+        self.add_item(ReviewAcceptButton(user_id, application_channel_id, review_channel_id))
+        self.add_item(ReviewDeclineButton(user_id, application_channel_id, review_channel_id))
+
+
+# Registrazione una tantum a livello di modulo: dice al bot come "ricostruire"
+# i bottoni Accept/Decline orfani (arrivati su un messaggio che il processo
+# corrente non ha mai visto, tipico dopo un restart) a partire dal custom_id.
+bot.add_dynamic_items(ReviewAcceptButton, ReviewDeclineButton)
 
 @bot.event
 async def on_message(message):
@@ -1534,7 +1633,7 @@ async def complete_application(user, app_data):
             inline=False
         )
         
-        view = ReviewView(user.id, character_name, application_channel, review_channel)
+        view = ReviewView(user.id, application_channel.id if application_channel else 0, review_channel.id)
         await review_channel.send(embed=embed, view=view)
         
         # Send character detail reviews for all characters mentioned in the application
@@ -1832,13 +1931,18 @@ async def setupHopium(ctx):
     setup_messages.append(msg)
     
     # Create the application message with button
+    apply_description = (
+        f"Click the button below to start your application process!\nIf anything goes wrong, please contact {await get_staff_mentions(guild)}."
+        if DM_APPLICATION_ENABLED else
+        f"Click the button below to apply on our website!\nIf anything goes wrong, please contact {await get_staff_mentions(guild)}."
+    )
     embed = discord.Embed(
         title="📋 Application for Hopium Guild",
-        description=f"Click the button below to start your application process!\nIf anything goes wrong, please contact {await get_staff_mentions(guild)}.",
+        description=apply_description,
         color=0x00ff00
     )
-    
-    view = ApplicationView()
+
+    view = build_apply_view()
     await apply_channel.send(embed=embed, view=view)
     msg = await ctx.send("Application message sent with Apply button!")
     setup_messages.append(msg)
@@ -4660,4 +4764,4 @@ if __name__ == "__main__":
         logger.error(f"Unexpected error: {e}", exc_info=True)
         # Exit gracefully in production
         import sys
-        sys.exit(1)
+        sys.exit(1)
