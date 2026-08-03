@@ -26,4 +26,6 @@ Thumbs.db
 *.jpg
 *.jpeg
 
-.claude/
+.claude/.env
+*.bak-*
+apply_*.py

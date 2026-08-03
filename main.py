@@ -1376,8 +1376,9 @@ async def send_character_reviews(review_channel, app_data):
         await asyncio.sleep(0.5)
 
 async def complete_application(user, app_data):
-    # Remove from active applications
-    del active_applications[user.id]
+    # Remove from active applications (se presente: un'application
+    # arrivata dal sito web non passa mai da active_applications)
+    active_applications.pop(user.id, None)
     
     # Get the guild
     guild = bot.get_guild(app_data['guild_id'])
@@ -1842,8 +1843,8 @@ async def setupHopium(ctx):
     msg = await ctx.send("Application message sent with Apply button!")
     setup_messages.append(msg)
     
-    # Check if "ADMIN" category exists
-    admin_category = discord.utils.get(guild.categories, name="ADMIN")
+    # Check if "ADMIN-BACKEND" category exists
+    admin_category = discord.utils.get(guild.categories, name="ADMIN-BACKEND")
     
     if not admin_category:
         # Create the "ADMIN" category with restricted permissions (Officers and Guild Leaders only)
@@ -1863,8 +1864,8 @@ async def setupHopium(ctx):
         if bot_member:
             overwrites[bot_member] = discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_messages=True, view_channel=True)
         
-        admin_category = await guild.create_category("ADMIN", overwrites=overwrites)
-        msg = await ctx.send("Created 'ADMIN' category!")
+        admin_category = await guild.create_category("ADMIN-BACKEND", overwrites=overwrites)
+        msg = await ctx.send("Created 'ADMIN-BACKEND' category!")
         setup_messages.append(msg)
     
     # Check if "HopiumBot" channel exists in the ADMIN category
@@ -4545,34 +4546,95 @@ if __name__ == "__main__":
         logger.info(f"Environment: {'Render (Production)' if os.getenv('RENDER') else 'Local Development'}")
         logger.info(f"Log level: {log_level}")
         
-        # Start HTTP server for Render health checks (only in production)
-        if os.getenv('RENDER'):
-            async def health_check(request):
-                return web.Response(text="HopiumBot is running!")
-            
-            async def start_web_server():
-                app = web.Application()
-                app.router.add_get('/', health_check)
-                app.router.add_get('/health', health_check)
-                
-                port = int(os.environ.get('PORT', 8080))
-                runner = web.AppRunner(app)
-                await runner.setup()
-                site = web.TCPSite(runner, '0.0.0.0', port)
-                await site.start()
-                print(f"🌐 Health check server started on port {port}")
-                logger.info(f"Health check server started on port {port}")
-            
-            # Start web server in background
-            async def main():
-                await start_web_server()
-                await bot.start(token)
-            
-            asyncio.run(main())
-        else:
-            # Local development - no web server needed
-            logger.info("🚀 Starting bot in local development mode")
-            bot.run(token)
+        # Web server: sempre attivo. Serve sia per l'health check
+        # (se ancora dietro un load balancer tipo Render) sia per
+        # ricevere le application inviate dal sito web via rete
+        # Docker interna (hopiumbot-net), a prescindere dall'hosting.
+        INTERNAL_SECRET = os.getenv('INTERNAL_API_SECRET')
+        if not INTERNAL_SECRET:
+            logger.warning("INTERNAL_API_SECRET non impostato: l'endpoint /internal/submit-application rifiutera' ogni richiesta.")
+
+        async def health_check(request):
+            return web.Response(text="HopiumBot is running!")
+
+        async def submit_application(request):
+            # Confronto a tempo costante per evitare timing attack sul secret.
+            import hmac
+            provided = request.headers.get('X-Internal-Secret', '')
+            if not INTERNAL_SECRET or not hmac.compare_digest(provided, INTERNAL_SECRET):
+                return web.Response(status=403, text="forbidden")
+
+            try:
+                data = await request.json()
+            except Exception:
+                return web.Response(status=400, text="invalid json")
+
+            discord_id = data.get('discord_id')
+            path = data.get('path')
+            answers = data.get('answers')
+
+            if not discord_id or not path or not isinstance(answers, list):
+                return web.Response(status=400, text="missing discord_id, path or answers")
+
+            if path not in APPLICATION_CONFIG['paths']:
+                return web.Response(status=400, text=f"unknown path: {path}")
+
+            questions = APPLICATION_CONFIG['paths'][path]
+            if len(answers) != len(questions):
+                return web.Response(
+                    status=400,
+                    text=f"expected {len(questions)} answers for path '{path}', got {len(answers)}"
+                )
+
+            if len(bot.guilds) != 1:
+                logger.error(f"submit_application: bot e' in {len(bot.guilds)} gilde, atteso esattamente 1.")
+                return web.Response(status=500, text="bot guild misconfiguration")
+            guild = bot.guilds[0]
+
+            try:
+                user = await bot.fetch_user(int(discord_id))
+            except Exception as e:
+                logger.error(f"submit_application: utente Discord {discord_id} non trovato: {e}")
+                return web.Response(status=404, text="discord user not found")
+
+            member = guild.get_member(user.id)
+            if not member:
+                return web.Response(status=404, text="user is not a member of the guild")
+
+            app_data = {
+                'guild_id': guild.id,
+                'path': path,
+                'questions': questions,
+                'answers': [str(a) for a in answers],
+            }
+
+            try:
+                await complete_application(user, app_data)
+            except Exception as e:
+                logger.error(f"submit_application: complete_application ha fallito: {e}", exc_info=True)
+                return web.Response(status=500, text="internal error while processing application")
+
+            return web.Response(status=200, text="ok")
+
+        async def start_web_server():
+            app = web.Application()
+            app.router.add_get('/', health_check)
+            app.router.add_get('/health', health_check)
+            app.router.add_post('/internal/submit-application', submit_application)
+
+            port = int(os.environ.get('PORT', 8080))
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', port)
+            await site.start()
+            print(f"🌐 Web server started on port {port}")
+            logger.info(f"Web server started on port {port}")
+
+        async def main():
+            await start_web_server()
+            await bot.start(token)
+
+        asyncio.run(main())
             
     except discord.LoginFailure:
         error_msg = "Invalid bot token. Please check your DISCORD_TOKEN environment variable."
@@ -4598,4 +4660,4 @@ if __name__ == "__main__":
         logger.error(f"Unexpected error: {e}", exc_info=True)
         # Exit gracefully in production
         import sys
-        sys.exit(1)
+        sys.exit(1)
