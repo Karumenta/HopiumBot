@@ -72,11 +72,9 @@ intents.members = True  # Enable member intents
 # Branching Application System
 APPLICATION_CONFIG = {
     "intro": {
-        "question": "Welcome to <Hopium>! As we have two raiding groups, please indicate which one you are interested in:",
+        "question": "Welcome to <Hopium>! Please indicate if you want to apply:",
         "options": [
-            {"id": "speed_run", "label": "⚡ Speed Run", "description": "Monday 20:00-00:00 ST - Alt character preferred"},
-            {"id": "chill", "label": "😎 Chill", "description": "Thursday 20:00-00:00 ST - 1 Character required"},
-            {"id": "both", "label": "🎯 Both", "description": "Both raiding days - Alt character preferred for Speed Run"},
+            {"id": "speed_run", "label": "⚡ Speed Run", "description": "Monday 20:00-00:00 ST"},
             {"id": "none", "label": "❌ None", "description": "I'm not interested"}
         ]
     },
@@ -84,34 +82,6 @@ APPLICATION_CONFIG = {
         "speed_run": [
             "[Speedrun] Main character name:",
             "[Speedrun] Main Class/Spec:",
-            "[Speedrun] Alt character name:",
-            "[Speedrun] Alt Class/Spec:",
-            "What country are you from and how old are you?",
-            "Please tell us a bit about yourself, who are you outside of the game?",
-            "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
-            "We expect above-average performance for your class and at least 80% raid attendance. Can you commit to that?",
-            "Why did you choose to apply to <Hopium>?",
-            "Can someone in <Hopium> vouch for you?",
-            "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
-        ],
-        "chill": [
-            "[Chill run] Character name:",
-            "[Chill run] Class/Spec:",
-            "What country are you from and how old are you?",
-            "Please tell us a bit about yourself, who are you outside of the game?",
-            "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
-            "We expect above-average performance for your class and at least 80% raid attendance. Can you commit to that?",
-            "Why did you choose to apply to <Hopium>?",
-            "Can someone in <Hopium> vouch for you?",
-            "Surprise us! What's something you'd like to tell us, it can be absolutely anything!"
-        ],
-        "both": [
-            "[Speedrun] Main character name:",
-            "[Speedrun] Main Class/Spec:",
-            "[Speedrun] Alt character name:",
-            "[Speedrun] Alt Class/Spec:",
-            "[Chill run] Character name:",
-            "[Chill run] Class/Spec:",
             "What country are you from and how old are you?",
             "Please tell us a bit about yourself, who are you outside of the game?",
             "Explain your WoW experience. Include logs of past relevant characters (Classic/SoM//SoD/Retail).",
@@ -125,13 +95,11 @@ APPLICATION_CONFIG = {
 
 # Question indices (0-based) that are optional per path.
 # When the user types 'skip' at any question in the set, all questions in that set are skipped.
-OPTIONAL_QUESTIONS = {
-    "speed_run": {2, 3},  # Alt character name and Alt Class/Spec
-    "both": {2, 3},       # Alt character name and Alt Class/Spec (Speedrun alt)
-}
+# Nessuna domanda opzionale: l'alt del speedrun e' stato rimosso.
+OPTIONAL_QUESTIONS = {}
 
 # Legacy support - will be removed after migration
-APPLICATION_QUESTIONS = APPLICATION_CONFIG["paths"]["both"]
+APPLICATION_QUESTIONS = APPLICATION_CONFIG["paths"]["speed_run"]
 
 # Old DM-based application flow (Apply button -> active_applications).
 # Applications now go through the website's /application form instead, but
